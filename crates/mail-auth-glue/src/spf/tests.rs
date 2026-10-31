@@ -178,6 +178,10 @@ async fn rfc_7208_appendix_a3_dnsbl_style() {
     );
 }
 
+// RFC 7208 Appendix A.4 is not tested: a bare `ptr` in
+// ptr._spf.example.com targets that domain itself, so it never matches and
+// the example as written fails every sender.
+
 #[tokio::test]
 async fn record_selection() {
     // RFC 7208 §4.5: no record is none; two records are permerror.

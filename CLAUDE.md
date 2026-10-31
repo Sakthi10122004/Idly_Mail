@@ -127,6 +127,20 @@ Principle: **lenient on harmless syntax, strict on framing.**
   (`mx_targets`). No config key or flag may name a delivery host.
   `--test-mode` can only *restrict* delivery to an allow-list.
 
+## Inbound authentication handling (maintainer-approved, milestone 6 implements)
+
+Always strip forged Authentication-Results (RFC 8601 §5) and add ours
+first, before any decision below.
+
+1. **temperror** (SPF, DKIM or DMARC, caused by DNS failures): fail OPEN.
+   Accept the message, record the temperror in Authentication-Results, log
+   at warn. Never reject or 4xx because of our own DNS trouble.
+2. **DMARC permerror** (no From, several From fields, more than 3 Author
+   Domains, unparseable From): accept and deliver to the recipient's Junk
+   folder, log at info naming the reason. Do not reject.
+3. **DMARC fail** (after any `t=y` downgrade): `p=reject` -> `550 5.7.1` at
+   the end of DATA; `p=quarantine` -> Junk; `p=none` -> deliver normally.
+
 ## RFC citations
 
 Cite as `RFC NNNN §X.Y`. `scripts/check-rfc-cites --fetch` (also run in CI)
