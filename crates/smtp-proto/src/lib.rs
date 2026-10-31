@@ -12,12 +12,18 @@
 pub mod address;
 pub mod command;
 mod cursor;
+pub mod data;
+pub mod ehlo;
 pub mod error;
 pub mod limits;
 pub mod line;
 pub mod params;
+pub mod reply;
 
 pub use address::{ForwardPath, Host, Mailbox, ReversePath};
 pub use command::{Command, InitialResponse};
+pub use data::{DataDecoder, Progress};
+pub use ehlo::{Capability, EhloResponse};
 pub use error::{EnhancedCode, Error};
 pub use params::{BodyType, MailParam, Notify, RawParam, RcptParam, Ret};
+pub use reply::Reply;
