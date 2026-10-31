@@ -1,0 +1,2 @@
+RCPT TO:<Postmaster>
+RCPT TO:<@r1.example,@r2.example:u@[IPv6:2001:db8::1]>

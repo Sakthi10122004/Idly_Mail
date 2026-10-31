@@ -1,0 +1,2 @@
+MAIL FROM:<"john doe"@[192.0.2.1]>
+MAIL FROM:<用户@例子.广告> SMTPUTF8

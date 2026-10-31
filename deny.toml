@@ -12,6 +12,7 @@ yanked = "deny"
 [licenses]
 version = 2
 confidence-threshold = 0.93
+unused-allowed-license = "allow"
 # Permissive licenses only. Copyleft (GPL, LGPL, AGPL, MPL, EPL, ...) is
 # rejected because it is not listed here.
 allow = [

@@ -1,0 +1,53 @@
+[package]
+name = "smtp-proto-fuzz"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0 OR MIT"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+smtp-proto = { path = "../crates/smtp-proto" }
+
+# Kept out of the main workspace: the fuzz harness is never linked into idly.
+[workspace]
+members = ["."]
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[profile.release]
+debug = 1
+# Overflow checks stay on so arithmetic bugs surface as crashes.
+overflow-checks = true
+
+[[bin]]
+name = "command_parse"
+path = "fuzz_targets/command_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "reply_parse"
+path = "fuzz_targets/reply_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "data_decode"
+path = "fuzz_targets/data_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "roundtrip"
+path = "fuzz_targets/roundtrip.rs"
+test = false
+doc = false
+bench = false

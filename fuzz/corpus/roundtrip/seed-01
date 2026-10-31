@@ -1,0 +1,1 @@
+RCPT TO:<postmaster> NOTIFY=delay,success

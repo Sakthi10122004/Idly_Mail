@@ -1,0 +1,1 @@
+RCPT TO:<bob@example.org> NOTIFY=SUCCESS,DELAY ORCPT=rfc822;bob@example.org
