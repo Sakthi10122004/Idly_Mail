@@ -3,3 +3,17 @@ allow-unwrap-in-tests = true
 allow-expect-in-tests = true
 allow-panic-in-tests = true
 allow-indexing-slicing-in-tests = true
+
+# The rsa crate is allowed only for DKIM key generation (RUSTSEC-2023-0071,
+# see deny.toml). Signing and decryption must go through ring.
+disallowed-methods = [
+    { path = "rsa::RsaPrivateKey::sign", reason = "sign with ring (RUSTSEC-2023-0071)" },
+    { path = "rsa::RsaPrivateKey::sign_with_rng", reason = "sign with ring (RUSTSEC-2023-0071)" },
+    { path = "rsa::RsaPrivateKey::decrypt", reason = "no RSA decryption (RUSTSEC-2023-0071)" },
+    { path = "rsa::RsaPrivateKey::decrypt_blinded", reason = "no RSA decryption (RUSTSEC-2023-0071)" },
+]
+disallowed-types = [
+    { path = "rsa::pkcs1v15::SigningKey", reason = "sign with ring (RUSTSEC-2023-0071)" },
+    { path = "rsa::pss::SigningKey", reason = "sign with ring (RUSTSEC-2023-0071)" },
+    { path = "rsa::pss::BlindedSigningKey", reason = "sign with ring (RUSTSEC-2023-0071)" },
+]

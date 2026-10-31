@@ -12,6 +12,26 @@ grouped by development phase (see the roadmap in [README.md](README.md)).
 ### Phase 1 — Send and receive (in progress)
 
 #### Added
+- **DKIM** (`mail-auth-glue` crate, RFC 6376 and RFC 8463):
+  - Signing with RSA-SHA256 and Ed25519-SHA256, relaxed/relaxed
+    canonicalization. Header fields are "oversigned", so none can be added
+    after signing without breaking the signature.
+  - Verification of up to 8 signatures per message, with results named as
+    in RFC 8601 (`pass`, `fail`, `policy`, `temperror`, `permerror`).
+    RSA keys of 1024 to 4096 bits are accepted (RFC 8301); `rsa-sha1` is
+    never accepted.
+  - A signature that covers only part of the body (`l=`) is reported as
+    `policy` rather than `pass`, because content could have been appended
+    after signing.
+  - Key generation: 2048-bit RSA and Ed25519, with the DNS record to
+    publish.
+  - Checked against the official RFC 8463 test vectors: both published
+    signatures verify, and our signer reproduces the published Ed25519
+    signature byte for byte.
+- **Message parsing** for authentication: header fields kept exactly as
+  received, and the domains of the From field (with display names,
+  comments, quoted strings and groups).
+- **Fuzz targets** `message_parse` and `dkim_verify`, also run in CI.
 - **Local demo:** `idly serve --demo` receives mail and writes it to
   Maildir.
   - It only listens on 127.0.0.1 and refuses to start with any other
@@ -72,6 +92,15 @@ grouped by development phase (see the roadmap in [README.md](README.md)).
   decide the result; unused signatures are ignored.
 
 #### Security
+- **The `rsa` crate (advisory RUSTSEC-2023-0071) is used only to generate
+  DKIM keys offline.** All signing and verification uses `ring`, and
+  `clippy.toml` forbids the `rsa` crate's signing and decryption functions.
+  The advisory is ignored in `deny.toml` and `.cargo/audit.toml` with this
+  reason.
+- **Fixed an infinite loop in From-address parsing** found by fuzzing. A
+  stray `]` in an address field made the parser loop until it ran out of
+  memory. It was not yet reachable from the network; a regression test
+  keeps it fixed.
 - **Bare CR or LF in message data** (an SMTP smuggling attempt) is handled
   as follows:
   - the server replies `500 5.5.2` and closes the connection;

@@ -9,6 +9,11 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
+ignore = [
+    # Same as ../deny.toml: the rsa crate is only used for offline DKIM key
+    # generation; signing and verification use ring.
+    { id = "RUSTSEC-2023-0071", reason = "rsa crate used for offline key generation only; signing uses ring" },
+]
 
 [licenses]
 version = 2

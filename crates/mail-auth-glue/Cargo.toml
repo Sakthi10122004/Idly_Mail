@@ -1,0 +1,26 @@
+[package]
+name = "mail-auth-glue"
+description = "SPF, DKIM, DMARC and Authentication-Results for Idly Mail"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+dns.workspace = true
+smtp-proto.workspace = true
+ring.workspace = true
+base64.workspace = true
+# Only for generating RSA keys (dkim::keygen). Signing and verification use
+# ring. See CLAUDE.md and the RUSTSEC-2023-0071 note in deny.toml.
+rsa.workspace = true
+rand_core.workspace = true
+
+[dev-dependencies]
+dns = { workspace = true, features = ["testing"] }
+tokio.workspace = true
+
+[lints]
+workspace = true

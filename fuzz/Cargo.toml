@@ -11,6 +11,9 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 smtp-proto = { path = "../crates/smtp-proto" }
+mail-auth-glue = { path = "../crates/mail-auth-glue" }
+dns = { path = "../crates/dns", features = ["testing"] }
+tokio = { version = "1", default-features = false, features = ["rt"] }
 
 # Kept out of the main workspace: the fuzz harness is never linked into idly.
 [workspace]
@@ -48,6 +51,20 @@ bench = false
 [[bin]]
 name = "roundtrip"
 path = "fuzz_targets/roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "message_parse"
+path = "fuzz_targets/message_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dkim_verify"
+path = "fuzz_targets/dkim_verify.rs"
 test = false
 doc = false
 bench = false

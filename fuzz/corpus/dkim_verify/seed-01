@@ -1,0 +1,1 @@
+v=1; a=rsa-sha256; c=relaxed/relaxed; d=example.com; s=sel; h=from:to; bh=MTIz; b=YWJj; l=10; t=1; x=2

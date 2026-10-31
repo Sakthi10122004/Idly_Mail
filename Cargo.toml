@@ -14,6 +14,11 @@ publish = false
 smtp-proto = { path = "crates/smtp-proto" }
 dns = { path = "crates/dns" }
 smtp-server = { path = "crates/smtp-server" }
+mail-auth-glue = { path = "crates/mail-auth-glue" }
+ring = { version = "0.17", default-features = false, features = ["std"] }
+base64 = { version = "0.23", default-features = false, features = ["std"] }
+rsa = { version = "0.9", default-features = false, features = ["std", "pem"] }
+rand_core = { version = "0.6", default-features = false, features = ["getrandom"] }
 hickory-resolver = { version = "=0.26.3", default-features = false, features = ["recursor", "dnssec-ring", "tokio"] }
 tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread", "macros", "net", "time", "sync", "io-util", "signal", "fs"] }
 idna = { version = "1", default-features = false, features = ["std", "compiled_data"] }
@@ -47,3 +52,10 @@ panic = "warn"
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
+
+# RSA key generation (rsa crate) is very slow without optimization; keep
+# tests fast.
+[profile.dev.package.num-bigint-dig]
+opt-level = 3
+[profile.dev.package.rsa]
+opt-level = 3

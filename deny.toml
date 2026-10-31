@@ -8,6 +8,14 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
+ignore = [
+    # Marvin attack: timing of RSA *private-key operations* (decrypt/sign)
+    # observable by an attacker. We use the rsa crate ONLY to generate DKIM
+    # keys offline in the CLI; all signing and verification use ring.
+    # clippy.toml forbids rsa's signing/decryption APIs, so this cannot
+    # quietly change. Approved by the maintainer (CLAUDE.md).
+    { id = "RUSTSEC-2023-0071", reason = "rsa crate used for offline key generation only; signing uses ring" },
+]
 
 [licenses]
 version = 2

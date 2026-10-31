@@ -1,0 +1,4 @@
+# cargo-audit configuration. Keep in sync with [advisories] in deny.toml.
+[advisories]
+# rsa crate: used only for offline DKIM key generation; signing uses ring.
+ignore = ["RUSTSEC-2023-0071"]
