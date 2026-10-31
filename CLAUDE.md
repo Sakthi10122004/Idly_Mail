@@ -94,6 +94,12 @@ Principle: **lenient on harmless syntax, strict on framing.**
   has RUSTSEC-2026-0106, a cache-poisoning bug fixed only in
   hickory-resolver's recursor. Never use it.) A static test resolver exists only in tests and
   the dev-only `testing` feature, never in the release binary.
+- DMARC follows **RFC 9989** (DMARCbis, May 2026), which obsoletes
+  RFC 7489. The organizational domain comes from the RFC 9989 §4.10 DNS
+  Tree Walk, so there is **no Public Suffix List** and no MPL-2.0 data.
+  Maintainer rule if a PSL is ever needed: allow MPL-2.0 only as a
+  per-crate cargo-deny exception for the one crate carrying the unmodified
+  list, embedded at build time (no runtime downloads), and record it here.
 - Phase 1 delivers local inbound mail to Maildir; Phase 2 imports it.
 - No relay, structurally: delivery targets come only from DNS
   (`mx_targets`). No config key or flag may name a delivery host.
