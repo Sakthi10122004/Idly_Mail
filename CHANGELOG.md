@@ -1,0 +1,138 @@
+# Changelog
+
+All notable changes to Idly Mail are recorded here. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
+will use [Semantic Versioning](https://semver.org/) once it has releases.
+
+Nothing has been released yet, so every change is under **Unreleased**,
+grouped by development phase (see the roadmap in [README.md](README.md)).
+
+## [Unreleased]
+
+### Phase 1 — Send and receive (in progress)
+
+#### Added
+- **Local demo:** `idly serve --demo` receives mail and writes it to
+  Maildir.
+  - It only listens on 127.0.0.1 and refuses to start with any other
+    address.
+  - It is receive-only: no outbound delivery exists in this mode.
+  - `idly.demo.toml` is a ready-made demo config. README's "Try it
+    locally" section shows how to use it with `swaks` and `nc`.
+- **Inbound SMTP server** (`smtp-server` crate):
+  - Strict CRLF-only framing.
+  - Configurable limits: command-line length (default 4 KiB), message line
+    length (default 64 KiB), message size and recipient count.
+  - Pipelining, an idle timeout and a connection limit.
+  - Accepts mail only for local accounts and never relays (`550 5.7.1`).
+    Mail to `postmaster` is always accepted.
+  - SMTPUTF8 and internationalized addresses.
+- **Maildir delivery:** each message is written durably (fsync, then
+  rename) before the server confirms it. Idly adds `Return-Path`,
+  `Delivered-To` and `Received` header fields.
+- **Configuration file** (TOML), with every key documented in
+  `idly.example.toml`.
+  - Unknown keys are errors, so a relay or smarthost cannot be configured.
+  - `idly check-config` lists every problem at once, each with the name of
+    its key.
+  - At least one `[[account]]` is required; it receives postmaster mail.
+- **Commands:** `idly check-config` and `idly serve [--test-mode | --demo]`.
+  - Test mode refuses to start without an allow-list of domains.
+- **Logs:** JSON by default, or plain text for a terminal.
+- **Prometheus metrics** on `127.0.0.1:9100`: `idly_test_mode`,
+  `idly_messages_accepted_total` and `idly_smuggling_attempts_total`.
+- **DNS** (`dns` crate): our own recursive, DNSSEC-validating resolver,
+  starting from the IANA root servers. No public resolver is used.
+  - Every answer reports whether it is DNSSEC-secure.
+  - It distinguishes "domain does not exist", "no records of this type",
+    "failed validation" and "temporary failure".
+
+#### Changed
+- **DMARC will follow RFC 9989** (DMARCbis, May 2026) instead of the
+  obsolete RFC 7489. Its DNS Tree Walk replaces the Public Suffix List, so
+  no list data is needed.
+- **The DNS recursor now comes from `hickory-resolver` 0.26.3** (its
+  `recursor` feature), replacing the planned standalone `hickory-recursor`
+  alpha. See Security.
+- **One crypto library:** `ring` everywhere. `aws-lc-rs`/`aws-lc-sys`
+  (OpenSSL-licensed code) and `webpki-roots` (CDLA license) are banned in
+  `deny.toml`.
+
+#### Fixed
+- **DNSSEC answers from zones signed with several keys came out as
+  insecure.** For example, Debian's DANE records were affected, so DANE
+  would silently never have applied to them. Only the data records now
+  decide the result; unused signatures are ignored.
+
+#### Security
+- **Bare CR or LF in message data** (an SMTP smuggling attempt) is handled
+  as follows:
+  - the server replies `500 5.5.2` and closes the connection;
+  - the partial message is discarded and never stored;
+  - the client IP is logged with `reason="smuggling-attempt"` and the
+    attempt is counted in a metric.
+- **`hickory-recursor` is banned.** It has a cache-poisoning advisory,
+  RUSTSEC-2026-0106, with no fixed release.
+
+### Phase 0.5 — Fixes after Phase 0 review
+
+#### Added
+- **RFC citation checker:** `scripts/check-rfc-cites`, also run in CI.
+  - It downloads every RFC the code cites into `docs/rfc/` (not
+    committed).
+  - It fails if a cited section does not exist.
+  - `--show` prints a section's text.
+- **Internationalized domain names** are validated and converted with the
+  `idna` crate (UTS #46 / IDNA2008). Length limits are checked on the
+  ASCII form.
+- **Policy limits:** `DEFAULT_COMMAND_LINE_CAP` (4 KiB) and
+  `DEFAULT_INBOUND_TEXT_LINE_CAP` (64 KiB).
+
+#### Changed
+- **Lenient on harmless syntax, strict on framing:**
+  - A space after the colon in `MAIL FROM:`/`RCPT TO:` is accepted.
+  - An invalid or missing HELO/EHLO name is accepted and recorded as a
+    spam signal, never rejected.
+  - Line endings and the end-of-data marker stay strict, with no setting
+    to relax them.
+- **Git history was rewritten** to remove AI co-author lines from commit
+  messages. Contents, authors and dates are unchanged. Clones made before
+  the rewrite need to be re-synced.
+- **Pushes and AI attribution are blocked by project settings.**
+  `.claude/settings.json` blocks `git push` and AI attribution for AI
+  tooling working in this repository.
+
+#### Fixed
+- **Legal dot-stuffed lines were rejected.** The DATA decoder counted the
+  dot-stuffing ("transparency") dot toward the 1000-octet line limit;
+  RFC 5321 §4.5.3.1.6 excludes it.
+- **14 RFC citations named the wrong section,** found by checking each one
+  against the RFC text.
+
+### Phase 0 — Foundation
+
+#### Added
+- **Workspace:** a Cargo workspace with the `idly` binary and the
+  `smtp-proto` library. It is dual-licensed Apache-2.0 OR MIT, and
+  `#![forbid(unsafe_code)]` is set in every crate.
+- **`smtp-proto`:** an SMTP library that does no I/O itself.
+  - **Commands:** parses and writes HELO, EHLO, MAIL, RCPT, DATA, BDAT,
+    RSET, VRFY, EXPN, HELP, NOOP, QUIT, STARTTLS and AUTH, with typed
+    MAIL/RCPT parameters.
+  - **Addresses:** IPv4, IPv6 and general address literals, quoted
+    local-parts, old-style source routes (accepted and ignored), and
+    UTF-8 addresses.
+  - **Replies:** multi-line replies, enhanced status codes, and a typed
+    list of EHLO capabilities.
+  - **Message data:** a DATA decoder that ends only at `CRLF.CRLF` and
+    rejects any bare CR or LF, plus the matching encoder.
+- **Fuzzing:** four cargo-fuzz targets (command parsing, reply parsing,
+  DATA decoding, and parse/write round trips). Each ran 10 minutes with
+  no crash.
+- **CI** (GitHub Actions): formatting, clippy with warnings as errors,
+  tests, license and dependency policy (`cargo-deny`), security advisories
+  (`cargo-audit`), and short fuzz runs.
+- **Dependency policy** (`deny.toml`): permissive licenses only. OpenSSL,
+  relay and third-party mail-API crates, and cloud SDKs are banned.
+- **Documentation:** a README explaining the no-relay principle, and
+  CLAUDE.md with the project's hard constraints and working rules.

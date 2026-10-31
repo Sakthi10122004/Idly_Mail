@@ -45,6 +45,9 @@ If a change would bend any of these, stop and ask the maintainer.
   `git push`**: the maintainer pushes. **No AI attribution in commits**: no
   `Co-Authored-By: Claude` (or similar) trailer, so no AI tool shows up as a
   contributor.
+- **Changelog:** every milestone commit updates `CHANGELOG.md` (Keep a
+  Changelog format, under `[Unreleased]`, grouped by phase), written for
+  operators and contributors rather than as a commit log.
 - **End of phase report:** what was built, how to run it, test results, and
   what is left.
 
