@@ -1,0 +1,47 @@
+# Idly Mail example configuration.
+#
+# Check a config file with:   idly --config /etc/idly/idly.toml check-config
+#
+# Unknown keys are errors. There is deliberately no relay or smarthost option:
+# Idly delivers directly to each recipient domain's MX (see README.md).
+
+[server]
+# Fully qualified host name of this server. Used in the SMTP banner and EHLO;
+# its A/AAAA records and the PTR of the public IPs should all match it.
+hostname = "mx.example.org"
+# Queue, spool, Maildir and keys live here.
+data_dir = "/var/lib/idly"
+# Public IP addresses, used to check PTR records. Leave empty to auto-detect.
+public_ips = []
+
+[listen]
+smtp = ["0.0.0.0:25", "[::]:25"]                 # inbound mail
+submission = ["0.0.0.0:587", "[::]:587"]         # clients, STARTTLS + AUTH
+submissions = ["0.0.0.0:465", "[::]:465"]        # clients, implicit TLS + AUTH
+metrics = "127.0.0.1:9100"                       # Prometheus; keep on loopback
+
+[limits]
+command_line = 4096         # octets, CRLF included (RFC minimum: 512)
+inbound_line = 65536        # octets per DATA line (RFC minimum: 1000)
+message_size = 26214400     # 25 MiB, announced with SIZE
+max_recipients = 100        # per message (RFC minimum: 100)
+
+# Domains this server handles. Repeat the block for each domain.
+[[domain]]
+name = "example.org"
+
+# Accounts that may send mail through submission (587/465).
+# Generate the hash with:  idly user hash-password
+[[account]]
+address = "alice@example.org"
+password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$REPLACEMEREPLACEMEREPLACEMEREPLACEME"
+
+# Test mode: deliver ONLY to these domains, so a test setup cannot send mail
+# to the internet by accident. Also enabled with `idly serve --test-mode`.
+[test_mode]
+enabled = false
+allow_domains = []
+
+[log]
+format = "json"   # or "text" for a terminal
+level = "info"
