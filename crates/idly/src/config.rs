@@ -46,7 +46,6 @@ pub(crate) struct Server {
 #[serde(deny_unknown_fields)]
 pub(crate) struct Listen {
     /// Inbound SMTP (port 25).
-    #[allow(dead_code)] // SMTP listeners arrive in milestone 3.5
     #[serde(default = "default_smtp")]
     pub(crate) smtp: Vec<SocketAddr>,
     /// Submission with STARTTLS (port 587).
@@ -289,6 +288,13 @@ impl Config {
             }
         }
 
+        if self.accounts.is_empty() {
+            // RFC 5321 §4.5.1: mail to postmaster must be deliverable.
+            bad(
+                "account".into(),
+                "at least one [[account]] is required (postmaster mail goes to it)",
+            );
+        }
         let mut seen = HashSet::new();
         for (i, a) in self.accounts.iter().enumerate() {
             match Mailbox::parse(&a.address) {
@@ -367,6 +373,38 @@ impl Config {
     }
 }
 
+impl Config {
+    /// Extra rules for `idly serve --demo`: every listener must be on
+    /// 127.0.0.1 exactly, so the demo can never be reached from outside.
+    pub(crate) fn validate_demo(&self) -> Result<(), Vec<Problem>> {
+        let loopback = |a: &SocketAddr| a.ip() == IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+        let mut p = Vec::new();
+        if self.listen.smtp.is_empty() {
+            p.push(Problem {
+                path: "listen.smtp".into(),
+                message: "demo mode needs a listener, e.g. [\"127.0.0.1:2525\"]".into(),
+            });
+        }
+        for (i, a) in self.listen.smtp.iter().enumerate() {
+            if !loopback(a) {
+                p.push(Problem {
+                    path: format!("listen.smtp[{i}]"),
+                    message: format!("demo mode only listens on 127.0.0.1, not {a}"),
+                });
+            }
+        }
+        if let Some(a) = self.listen.metrics
+            && !loopback(&a)
+        {
+            p.push(Problem {
+                path: "listen.metrics".into(),
+                message: format!("demo mode only listens on 127.0.0.1, not {a}"),
+            });
+        }
+        if p.is_empty() { Ok(()) } else { Err(p) }
+    }
+}
+
 /// The A-label form of a domain, if it is a valid domain name (no literals).
 fn domain_ascii(name: &str) -> Option<String> {
     match Host::parse(name) {
@@ -390,6 +428,10 @@ mod tests {
 
         [[domain]]
         name = "example.org"
+
+        [[account]]
+        address = "alice@example.org"
+        password_hash = "$argon2id$x"
     "#;
 
     fn problems(text: &str) -> Vec<String> {
@@ -479,6 +521,40 @@ mod tests {
             );
         }
         assert_eq!(p.len(), 9, "{p:#?}");
+    }
+
+    #[test]
+    fn accounts_required() {
+        let text = MINIMAL.split("[[account]]").next().unwrap();
+        assert!(problems(text).iter().any(|p| p.starts_with("account:")));
+    }
+
+    #[test]
+    fn demo_config_is_valid() {
+        let c = Config::parse(include_str!("../../../idly.demo.toml")).unwrap();
+        c.validate().unwrap();
+        c.validate_demo().unwrap();
+    }
+
+    #[test]
+    fn demo_refuses_non_loopback_binds() {
+        let mut c = Config::parse(MINIMAL).unwrap();
+        // Defaults listen on 0.0.0.0 and [::].
+        let p = c.validate_demo().unwrap_err();
+        assert_eq!(p.len(), 2, "{p:?}");
+        for bad in [
+            "0.0.0.0:2525",
+            "[::1]:2525",
+            "192.168.1.5:2525",
+            "127.0.0.2:2525",
+        ] {
+            c.listen.smtp = vec![bad.parse().unwrap()];
+            assert!(c.validate_demo().is_err(), "{bad}");
+        }
+        c.listen.smtp = vec!["127.0.0.1:2525".parse().unwrap()];
+        c.validate_demo().unwrap();
+        c.listen.metrics = Some("0.0.0.0:9100".parse().unwrap());
+        assert!(c.validate_demo().is_err());
     }
 
     #[test]

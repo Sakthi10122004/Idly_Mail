@@ -603,6 +603,7 @@ dependencies = [
  "prometheus-client",
  "serde",
  "smtp-proto",
+ "smtp-server",
  "tempfile",
  "tokio",
  "toml",
@@ -1212,6 +1213,16 @@ version = "0.0.1"
 dependencies = [
  "idna",
  "proptest",
+]
+
+[[package]]
+name = "smtp-server"
+version = "0.0.1"
+dependencies = [
+ "smtp-proto",
+ "tempfile",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

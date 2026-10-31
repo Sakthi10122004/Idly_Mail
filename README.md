@@ -5,8 +5,9 @@ sends, receives, stores and serves email for one or more domains. It is built
 to run on a 1 GB VPS with embedded storage, and the same binary is designed to
 scale out to a cluster later.
 
-> **Status:** Phase 0 (foundation). The SMTP protocol library is in place;
-> the server cannot send or receive mail yet. See [Roadmap](#roadmap).
+> **Status:** Phase 1 in progress. Idly can receive mail in a local,
+> receive-only demo (see [Try it locally](#try-it-locally)); it cannot send
+> mail yet. See [Roadmap](#roadmap).
 
 ## The no-relay principle
 
@@ -69,6 +70,65 @@ Fuzzing (needs nightly and `cargo install cargo-fuzz`):
 ```sh
 cargo +nightly fuzz run command_parse -- -max_total_time=60
 ```
+
+## Try it locally
+
+A receive-only demo runs on your own machine. It only listens on 127.0.0.1
+(it refuses any other address), it has no outbound delivery at all, and it
+writes every accepted message to a Maildir folder. It applies the same
+strict SMTP rules as the real server, including the bare-CR/LF rejection.
+It does not yet do TLS, logins or SPF/DKIM/DMARC checks.
+
+```sh
+cargo build --release
+./target/release/idly --config idly.demo.toml serve --demo
+```
+
+The demo config ([idly.demo.toml](idly.demo.toml)) accepts mail for
+`alice@demo.test` on `127.0.0.1:2525`. In a second terminal, send a message:
+
+**With swaks** (`sudo apt install swaks`):
+
+```sh
+swaks --server 127.0.0.1:2525 --from me@example.net --to alice@demo.test \
+      --header "Subject: Hello Idly" --body "First message."
+```
+
+**By hand with nc.** Use `-C` so that nc sends CRLF line endings, as SMTP
+requires:
+
+```sh
+printf 'EHLO laptop\nMAIL FROM:<me@example.net>\nRCPT TO:<alice@demo.test>\nDATA\nSubject: via nc\n\nHello from nc\n.\nQUIT\n' \
+  | nc -C -q 2 127.0.0.1 2525
+```
+
+Without `-C`, nc sends bare LF line endings. Idly rejects these on purpose
+(`500 5.5.2 bare LF received`), because accepting them is what makes SMTP
+smuggling possible:
+
+```sh
+printf 'EHLO laptop\n' | nc -q 2 127.0.0.1 2525
+```
+
+**Where the mail goes.** Each accepted message is one file in the Maildir
+`new/` folder of its recipient:
+
+```sh
+ls /tmp/idly-demo/maildir/alice@demo.test/new/
+cat /tmp/idly-demo/maildir/alice@demo.test/new/*
+```
+
+Each file is a complete message in standard RFC 5322 format, which is
+exactly what an `.eml` file is. Copy one to `message.eml` to open it in a
+mail client such as Thunderbird. Idly adds `Return-Path`, `Delivered-To`
+and `Received` header fields at the top.
+
+**What gets refused.** Mail to any other domain (`550 5.7.1 Relaying
+denied`), unknown users (`550 5.1.1`), and any message containing a bare CR
+or LF, which also closes the connection and discards the message.
+
+**Metrics** are at <http://127.0.0.1:9100/metrics>
+(`idly_messages_accepted_total`, `idly_smuggling_attempts_total`).
 
 ## Roadmap
 

@@ -13,6 +13,7 @@ publish = false
 [workspace.dependencies]
 smtp-proto = { path = "crates/smtp-proto" }
 dns = { path = "crates/dns" }
+smtp-server = { path = "crates/smtp-server" }
 hickory-resolver = { version = "=0.26.3", default-features = false, features = ["recursor", "dnssec-ring", "tokio"] }
 tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread", "macros", "net", "time", "sync", "io-util", "signal", "fs"] }
 idna = { version = "1", default-features = false, features = ["std", "compiled_data"] }

@@ -101,6 +101,10 @@ Principle: **lenient on harmless syntax, strict on framing.**
   per-crate cargo-deny exception for the one crate carrying the unmodified
   list, embedded at build time (no runtime downloads), and record it here.
 - Phase 1 delivers local inbound mail to Maildir; Phase 2 imports it.
+- `idly serve --demo` (milestone 3.5) must stay receive-only and
+  127.0.0.1-only: `Config::validate_demo` refuses any other bind address,
+  and the demo path builds only the inbound server and the Maildir sink.
+  `smtp-server` must never depend on the outbound client crate.
 - No relay, structurally: delivery targets come only from DNS
   (`mx_targets`). No config key or flag may name a delivery host.
   `--test-mode` can only *restrict* delivery to an allow-list.

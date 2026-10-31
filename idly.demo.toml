@@ -1,0 +1,25 @@
+# A local demo configuration: receive-only, loopback-only.
+#
+#   idly --config idly.demo.toml serve --demo
+#
+# See "Try it locally" in README.md.
+
+[server]
+hostname = "mx.demo.test"
+data_dir = "/tmp/idly-demo"        # messages appear under /tmp/idly-demo/maildir/
+
+[listen]
+smtp = ["127.0.0.1:2525"]          # demo mode refuses anything but 127.0.0.1
+metrics = "127.0.0.1:9100"
+
+[[domain]]
+name = "demo.test"
+
+[[account]]
+address = "alice@demo.test"
+# Demo mode has no login, so this hash is never checked.
+password_hash = "$argon2id$v=19$m=19456,t=2,p=1$ZGVtb2RlbW9kZW1v$ZGVtby1vbmx5LW5vdC1hLXJlYWwtaGFzaA"
+
+[log]
+format = "text"
+level = "info"

@@ -23,10 +23,8 @@ pub(crate) struct Metrics {
     /// 1 while test mode restricts outbound delivery.
     pub(crate) test_mode: Gauge,
     /// Connections dropped for a bare CR or LF (SMTP smuggling attempts).
-    #[allow(dead_code)] // incremented by the SMTP listeners (milestone 3.5)
     pub(crate) smuggling_attempts: Counter,
     /// Messages accepted and stored.
-    #[allow(dead_code)] // incremented by the SMTP listeners (milestone 3.5)
     pub(crate) messages_accepted: Counter,
 }
 
@@ -65,6 +63,19 @@ impl Metrics {
         // Encoding into a String cannot fail.
         let _ = encode(&mut out, &self.registry);
         out
+    }
+}
+
+/// Feeds SMTP server events into the metrics.
+#[derive(Debug, Clone)]
+pub(crate) struct MetricsObserver(pub(crate) Arc<Metrics>);
+
+impl smtp_server::Observer for MetricsObserver {
+    fn smuggling_attempt(&self, _client_ip: std::net::IpAddr) {
+        self.0.smuggling_attempts.inc();
+    }
+    fn message_accepted(&self) {
+        self.0.messages_accepted.inc();
     }
 }
 
