@@ -14,7 +14,7 @@ use smtp_proto::{
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::time::timeout;
 
-use crate::{Directory, Envelope, Observer, Recipient, Server, Sink, date};
+use crate::{Directory, Envelope, Observer, Recipient, Server, Signals, Sink, date};
 
 /// Too many bad commands in one session: the client is not speaking SMTP.
 const MAX_ERRORS: u32 = 20;
@@ -44,6 +44,7 @@ struct Session<'a, D, K, O, S> {
     esmtp: bool,
     tx: Option<Transaction>,
     errors: u32,
+    signals: Signals,
 }
 
 /// Runs a session to completion. `admitted` is false when the connection
@@ -69,6 +70,7 @@ pub(crate) async fn run<D, K, O, S>(
         esmtp: false,
         tx: None,
         errors: 0,
+        signals: Signals::default(),
     };
     tracing::debug!(%client_ip, "connection opened");
     if !admitted {
@@ -152,7 +154,13 @@ where
                     Err(e) => {
                         // A bare CR/LF or an over-long line: the stream
                         // can't be resynchronized, so reply and close.
-                        tracing::warn!(client_ip = %self.client_ip, reason = "bad-command-line", error = %e, "closing connection");
+                        if matches!(e, Error::BareCr | Error::BareLf) {
+                            // CLAUDE.md policy: counted like bare CR/LF in DATA.
+                            tracing::warn!(client_ip = %self.client_ip, reason = "smuggling-attempt", error = %e, "bare CR or LF in command line, closing connection");
+                            self.server.observer.smuggling_attempt(self.client_ip);
+                        } else {
+                            tracing::warn!(client_ip = %self.client_ip, reason = "bad-command-line", error = %e, "closing connection");
+                        }
                         self.reply_error(&e);
                         return self.flush().await;
                     }
@@ -175,8 +183,15 @@ where
     }
 
     async fn command(&mut self, line: &[u8]) -> std::io::Result<Next> {
-        let cmd = match Command::parse(line) {
-            Ok(c) => c,
+        let cmd = match Command::parse_with_signals(line) {
+            Ok((c, signals)) => {
+                if signals.missing_angle_brackets {
+                    // CLAUDE.md: accepted, never rejected; recorded for scoring.
+                    tracing::info!(client_ip = %self.client_ip, signal = "missing-angle-brackets", "accepted path without angle brackets");
+                    self.signals.missing_angle_brackets = true;
+                }
+                c
+            }
             Err(e) => {
                 self.reply_error(&e);
                 return Ok(self.count_error());
@@ -230,6 +245,7 @@ where
 
     fn greet(&mut self, name: ClientName, esmtp: bool) {
         if !name.is_valid() {
+            self.signals.invalid_client_name = true;
             // CLAUDE.md: never reject on the name; record it for scoring.
             tracing::info!(client_ip = %self.client_ip, client_name = %name, signal = "invalid-client-name", "accepted invalid HELO/EHLO name");
         }
@@ -421,6 +437,7 @@ where
             from: tx.from,
             recipients: tx.recipients,
             smtputf8: tx.smtputf8,
+            signals: self.signals,
         };
         let mut stored = received_header(&envelope, &self.cfg().hostname, self.esmtp).into_bytes();
         stored.extend_from_slice(&message);

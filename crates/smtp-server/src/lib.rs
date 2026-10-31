@@ -77,6 +77,18 @@ pub struct Envelope {
     pub recipients: Vec<String>,
     /// Whether the client used SMTPUTF8.
     pub smtputf8: bool,
+    /// Accepted protocol deviations, for the spam scorer.
+    pub signals: Signals,
+}
+
+/// Protocol deviations that policy accepts but records for spam scoring
+/// (CLAUDE.md, "lenient on harmless syntax"). Sticky for the session.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Signals {
+    /// The HELO/EHLO name did not match the RFC 5321 grammar.
+    pub invalid_client_name: bool,
+    /// A MAIL FROM or RCPT TO path came without angle brackets.
+    pub missing_angle_brackets: bool,
 }
 
 /// Final storage for accepted messages.

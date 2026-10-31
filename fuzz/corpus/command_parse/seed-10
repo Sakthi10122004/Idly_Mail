@@ -1,0 +1,7 @@
+MAIL FROM:user@example.com SIZE=10
+RCPT TO: bob@example.org NOTIFY=NEVER
+RCPT TO:postmaster
+MAIL FROM:
+MAIL FROM: 
+MAIL FROM:<>
+RCPT TO:@r.example:u@example.org

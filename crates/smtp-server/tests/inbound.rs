@@ -10,13 +10,13 @@
 
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use smtp_proto::{ForwardPath, Host, Reply};
 use smtp_server::maildir::Maildir;
-use smtp_server::{Directory, InboundConfig, Observer, Recipient, Server};
+use smtp_server::{Directory, Envelope, InboundConfig, Observer, Recipient, Server, Sink};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -59,10 +59,25 @@ impl Observer for TestObserver {
     }
 }
 
+/// Delivers to Maildir and keeps a copy of every envelope.
+struct RecordingSink {
+    maildir: Maildir,
+    envelopes: Arc<Mutex<Vec<Envelope>>>,
+}
+
+impl Sink for RecordingSink {
+    async fn deliver(&self, envelope: &Envelope, message: &[u8]) -> std::io::Result<()> {
+        self.maildir.deliver(envelope, message).await?;
+        self.envelopes.lock().unwrap().push(envelope.clone());
+        Ok(())
+    }
+}
+
 struct Harness {
     addr: SocketAddr,
     root: PathBuf,
     counts: Arc<Counts>,
+    envelopes: Arc<Mutex<Vec<Envelope>>>,
     _dir: tempfile::TempDir,
 }
 
@@ -82,12 +97,12 @@ async fn start(config: InboundConfig) -> Harness {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("maildir");
     let counts = Arc::new(Counts::default());
-    let server = Server::new(
-        config,
-        TestDirectory,
-        Maildir::new(&root, "mx.example.org"),
-        TestObserver(counts.clone()),
-    );
+    let envelopes = Arc::new(Mutex::new(Vec::new()));
+    let sink = RecordingSink {
+        maildir: Maildir::new(&root, "mx.example.org"),
+        envelopes: envelopes.clone(),
+    };
+    let server = Server::new(config, TestDirectory, sink, TestObserver(counts.clone()));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(server.run(listener));
@@ -95,6 +110,7 @@ async fn start(config: InboundConfig) -> Harness {
         addr,
         root,
         counts,
+        envelopes,
         _dir: dir,
     }
 }
@@ -243,6 +259,74 @@ async fn bare_lf_in_command_closes_connection() {
     let r = c.reply().await.unwrap();
     assert_eq!(r.code, 500);
     assert!(c.is_closed().await);
+    // CLAUDE.md policy: counted as a smuggling attempt, like bare CR/LF in DATA.
+    assert_eq!(h.counts.smuggling.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn bare_cr_in_command_counts_as_smuggling() {
+    let h = start(config()).await;
+    let (mut c, _) = Client::connect(h.addr).await;
+    c.cmd("EHLO x.example").await;
+    c.send(b"MAIL FROM:<a@example.net>\rRCPT TO:<alice@example.org>\r\n")
+        .await;
+    assert_eq!(c.reply().await.unwrap().code, 500);
+    assert!(c.is_closed().await);
+    assert_eq!(h.counts.smuggling.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn over_long_command_is_not_counted_as_smuggling() {
+    let mut cfg = config();
+    cfg.command_line_cap = 600;
+    let h = start(cfg).await;
+    let (mut c, _) = Client::connect(h.addr).await;
+    c.cmd(&format!("NOOP {}", "a".repeat(1000))).await;
+    assert!(c.is_closed().await);
+    assert_eq!(h.counts.smuggling.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn missing_angle_brackets_accepted_and_flagged() {
+    let h = start(config()).await;
+    let (mut c, _) = Client::connect(h.addr).await;
+    c.cmd("EHLO client.example.net").await;
+    assert_eq!(
+        c.cmd("MAIL FROM:sender@example.net SIZE=10").await.code,
+        250
+    );
+    assert_eq!(c.cmd("RCPT TO: alice@example.org").await.code, 250);
+    assert_eq!(c.cmd("DATA").await.code, 354);
+    c.send(b"x\r\n.\r\n").await;
+    assert_eq!(c.reply().await.unwrap().code, 250);
+    // An empty path is still an error, never the null sender.
+    assert_eq!(c.cmd("MAIL FROM:").await.code, 501);
+
+    let env = h.envelopes.lock().unwrap()[0].clone();
+    assert!(env.signals.missing_angle_brackets);
+    assert!(!env.signals.invalid_client_name);
+    // Stored with brackets: RFC-correct from here on.
+    let m = &messages(&h.root, "alice@example.org")[0];
+    assert!(
+        m.starts_with("Return-Path: <sender@example.net>\r\n"),
+        "{m}"
+    );
+}
+
+#[tokio::test]
+async fn bracketed_session_has_no_signals() {
+    let h = start(config()).await;
+    let (mut c, _) = Client::connect(h.addr).await;
+    c.cmd("EHLO client.example.net").await;
+    c.cmd("MAIL FROM:<sender@example.net>").await;
+    c.cmd("RCPT TO:<alice@example.org>").await;
+    c.cmd("DATA").await;
+    c.send(b"x\r\n.\r\n").await;
+    assert_eq!(c.reply().await.unwrap().code, 250);
+    assert_eq!(
+        h.envelopes.lock().unwrap()[0].signals,
+        smtp_server::Signals::default()
+    );
 }
 
 #[tokio::test]
@@ -282,6 +366,7 @@ async fn lenient_syntax_policy() {
     assert_eq!(c.reply().await.unwrap().code, 250);
     let m = &messages(&h.root, "bob@example.org")[0];
     assert!(m.contains("Received: from unknown ([127.0.0.1])"), "{m}");
+    assert!(h.envelopes.lock().unwrap()[0].signals.invalid_client_name);
 }
 
 #[tokio::test]

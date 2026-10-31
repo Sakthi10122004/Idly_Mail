@@ -48,6 +48,13 @@ grouped by development phase (see the roadmap in [README.md](README.md)).
     "failed validation" and "temporary failure".
 
 #### Changed
+- **Paths without angle brackets are accepted** (`MAIL FROM:user@example.com`,
+  with or without a space after the colon), parsed as if bracketed. The
+  path ends at the first space. `MAIL FROM:` with nothing after it is still
+  an error and is never treated as the null sender. Idly always writes
+  paths with brackets.
+- **Spam-scoring signals:** each accepted message now records a missing
+  angle bracket or an invalid HELO/EHLO name, for the future spam scorer.
 - **DMARC will follow RFC 9989** (DMARCbis, May 2026) instead of the
   obsolete RFC 7489. Its DNS Tree Walk replaces the Public Suffix List, so
   no list data is needed.
@@ -71,6 +78,10 @@ grouped by development phase (see the roadmap in [README.md](README.md)).
   - the partial message is discarded and never stored;
   - the client IP is logged with `reason="smuggling-attempt"` and the
     attempt is counted in a metric.
+- **A bare CR or LF in a command line** is now also logged as
+  `reason="smuggling-attempt"` and counted in
+  `idly_smuggling_attempts_total`. It used to be logged only as a bad
+  command line.
 - **`hickory-recursor` is banned.** It has a cache-poisoning advisory,
   RUSTSEC-2026-0106, with no fixed release.
 

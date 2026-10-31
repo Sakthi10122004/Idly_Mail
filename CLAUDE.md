@@ -61,6 +61,12 @@ Principle: **lenient on harmless syntax, strict on framing.**
   RFC 5321 §3.3 forbids it.
 - **Invalid EHLO/HELO name:** accepted, never rejected. The session records
   it as a signal for the Phase 3 spam scorer.
+- **Missing angle brackets** (`MAIL FROM:user@example.com`,
+  `RCPT TO: user@example.com`): accepted and parsed as if bracketed. The
+  path ends at the first space; the rest is parameters. An empty path
+  (`MAIL FROM:`) stays an error and never means the null sender `<>`.
+  Recorded as the `missing-angle-brackets` signal on the session and
+  Envelope, logged at info. Paths are always serialized with brackets.
 - **Long lines:**
   - Inbound (port 25): accepted up to a configurable hard cap (default
     64 KiB per line) for memory safety.
@@ -74,6 +80,9 @@ Principle: **lenient on harmless syntax, strict on framing.**
   - discard the partial message (it must never be queued);
   - log the client IP with reason `smuggling-attempt` for later reputation
     use.
+
+  A bare CR or LF in a **command line** is treated the same way: reply,
+  close, log `reason="smuggling-attempt"`, and count it in the metric.
 
   An integration test must prove that the message is not queued.
 - **Server replies (client side):** reply codes and framing are strict;

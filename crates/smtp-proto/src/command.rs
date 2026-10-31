@@ -52,6 +52,14 @@ impl core::fmt::Display for ClientName {
     }
 }
 
+/// Deviations from the RFC 5321 grammar that policy accepts (CLAUDE.md,
+/// "lenient on harmless syntax") but that a spam scorer should know about.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct Signals {
+    /// A MAIL FROM or RCPT TO path was sent without angle brackets.
+    pub missing_angle_brackets: bool,
+}
+
 /// An SMTP command.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Command {
@@ -115,6 +123,12 @@ pub enum Command {
 impl Command {
     /// Parses a command line without its trailing CRLF.
     pub fn parse(line: &[u8]) -> Result<Self, Error> {
+        Self::parse_with_signals(line).map(|(cmd, _)| cmd)
+    }
+
+    /// Like [`Command::parse`], also reporting accepted deviations.
+    pub fn parse_with_signals(line: &[u8]) -> Result<(Self, Signals), Error> {
+        let mut signals = Signals::default();
         // RFC 5321 §2.3.8: CR and LF only appear as the CRLF terminator, which
         // the caller has already removed.
         if line.contains(&b'\r') {
@@ -149,8 +163,8 @@ impl Command {
                 };
                 Self::Ehlo { name }
             }
-            ("MAIL", Some(_)) => parse_mail(&mut c)?,
-            ("RCPT", Some(_)) => parse_rcpt(&mut c)?,
+            ("MAIL", Some(_)) => parse_mail(&mut c, &mut signals)?,
+            ("RCPT", Some(_)) => parse_rcpt(&mut c, &mut signals)?,
             ("DATA", None) => Self::Data,
             ("BDAT", Some(a)) => parse_bdat(a)?,
             ("RSET", None) => Self::Rset,
@@ -170,7 +184,7 @@ impl Command {
             }
             _ => return Err(Error::UnrecognizedCommand),
         };
-        Ok(cmd)
+        Ok((cmd, signals))
     }
 
     /// Serializes the command, CRLF included.
@@ -228,14 +242,14 @@ impl Command {
 }
 
 /// RFC 5321 §4.1.1.2: `mail = "MAIL FROM:" Reverse-path [SP Mail-parameters] CRLF`
-fn parse_mail(c: &mut Cursor<'_>) -> Result<Command, Error> {
+fn parse_mail(c: &mut Cursor<'_>, signals: &mut Signals) -> Result<Command, Error> {
     if !c.eat_ignore_case("FROM:") {
         return Err(Error::Syntax("expected FROM:"));
     }
     // RFC 5321 §3.3 forbids spaces on either side of the colon. Policy
     // (CLAUDE.md): accept spaces after it, since that is harmless.
     let _ = c.take_while(|ch| ch == ' ');
-    let from = parse_reverse_path(c).map_err(|e| match e {
+    let from = lenient_path(c, parse_reverse_path, signals).map_err(|e| match e {
         Error::InvalidAddress(m) => Error::InvalidSender(m),
         e => e,
     })?;
@@ -248,13 +262,13 @@ fn parse_mail(c: &mut Cursor<'_>) -> Result<Command, Error> {
 
 /// RFC 5321 §4.1.1.3: `rcpt = "RCPT TO:" ( "<Postmaster@" Domain ">" /
 /// "<Postmaster>" / Forward-path ) [SP Rcpt-parameters] CRLF`
-fn parse_rcpt(c: &mut Cursor<'_>) -> Result<Command, Error> {
+fn parse_rcpt(c: &mut Cursor<'_>, signals: &mut Signals) -> Result<Command, Error> {
     if !c.eat_ignore_case("TO:") {
         return Err(Error::Syntax("expected TO:"));
     }
     // RFC 5321 §3.3 forbids it, but policy accepts spaces after the colon.
     let _ = c.take_while(|ch| ch == ' ');
-    let to = parse_forward_path(c).map_err(|e| match e {
+    let to = lenient_path(c, parse_forward_path, signals).map_err(|e| match e {
         Error::InvalidAddress(m) => Error::InvalidRecipient(m),
         e => e,
     })?;
@@ -263,6 +277,33 @@ fn parse_rcpt(c: &mut Cursor<'_>) -> Result<Command, Error> {
         None => Vec::new(),
     };
     Ok(Command::Rcpt { to, params })
+}
+
+/// Parses a path, also accepting one without angle brackets.
+///
+/// RFC 5321 §4.1.2 requires `<...>`. Policy (CLAUDE.md) accepts a bare path:
+/// it ends at the first space, and is parsed exactly as if bracketed. An
+/// empty path stays an error; it never means the null sender `<>`.
+fn lenient_path<T>(
+    c: &mut Cursor<'_>,
+    parse: fn(&mut Cursor<'_>) -> Result<T, Error>,
+    signals: &mut Signals,
+) -> Result<T, Error> {
+    if c.peek() == Some('<') {
+        return parse(c);
+    }
+    let bare = c.take_while(|ch| ch != ' ');
+    if bare.is_empty() {
+        return Err(Error::InvalidAddress("missing path"));
+    }
+    let wrapped = format!("<{bare}>");
+    let mut inner = Cursor::new(&wrapped);
+    let path = parse(&mut inner)?;
+    if !inner.is_empty() {
+        return Err(Error::InvalidAddress("unexpected characters in path"));
+    }
+    signals.missing_angle_brackets = true;
+    Ok(path)
 }
 
 /// After a path: nothing, or SP followed by parameters (consumes the rest).
@@ -493,11 +534,6 @@ mod tests {
         // Still rejected: space before the colon or between the words.
         assert!(parse("MAIL FROM :<a@b>").is_err());
         assert!(parse("MAIL  FROM:<a@b>").is_err());
-        // Bare address without angle brackets.
-        assert_eq!(
-            parse("MAIL FROM:a@b"),
-            Err(Error::InvalidSender("path must be enclosed in <>"))
-        );
         assert!(parse("MAIL FROM:<a@b> ").is_err(), "trailing space");
         assert!(parse("MAIL FROM:<a@b>SIZE=1").is_err());
         assert!(parse("MAIL TO:<a@b>").is_err());
@@ -511,6 +547,85 @@ mod tests {
         let line = format!("RCPT TO:<{local}@example.org>");
         assert!(line.len() > crate::limits::PATH);
         assert!(parse(&line).is_ok());
+    }
+
+    #[test]
+    fn missing_angle_brackets_accepted_and_flagged() {
+        let sig = |s: &str| {
+            Command::parse_with_signals(s.as_bytes()).map(|(_, g)| g.missing_angle_brackets)
+        };
+        let mail = |from: &str, params: Vec<MailParam>| Command::Mail {
+            from: ReversePath::Mailbox(mailbox(from)),
+            params,
+        };
+        // Parsed as if bracketed, with or without a space after the colon.
+        assert_eq!(
+            parse("MAIL FROM:user@example.com"),
+            Ok(mail("user@example.com", vec![]))
+        );
+        assert_eq!(
+            parse("MAIL FROM: user@example.com"),
+            Ok(mail("user@example.com", vec![]))
+        );
+        // The path ends at the first space; the rest is parameters.
+        assert_eq!(
+            parse("MAIL FROM:user@example.com SIZE=10"),
+            Ok(mail("user@example.com", vec![MailParam::Size(10)]))
+        );
+        assert_eq!(
+            parse("RCPT TO:bob@example.org NOTIFY=NEVER"),
+            Ok(Command::Rcpt {
+                to: ForwardPath::Mailbox(mailbox("bob@example.org")),
+                params: vec![RcptParam::Notify(Notify::Never)]
+            })
+        );
+        assert_eq!(
+            parse("RCPT TO:postmaster"),
+            Ok(Command::Rcpt {
+                to: ForwardPath::Postmaster,
+                params: vec![]
+            })
+        );
+        // Flagged for the spam scorer; bracketed paths are not.
+        assert_eq!(sig("MAIL FROM:user@example.com"), Ok(true));
+        assert_eq!(sig("RCPT TO: bob@example.org"), Ok(true));
+        assert_eq!(sig("MAIL FROM:<user@example.com>"), Ok(false));
+        assert_eq!(sig("MAIL FROM:<>"), Ok(false));
+        // Serialized WITH brackets, so outbound mail is always RFC-correct.
+        assert_eq!(
+            parse("MAIL FROM:user@example.com SIZE=10")
+                .unwrap()
+                .to_bytes(),
+            b"MAIL FROM:<user@example.com> SIZE=10\r\n"
+        );
+    }
+
+    #[test]
+    fn empty_path_is_never_the_null_sender() {
+        for bad in [
+            "MAIL FROM:",
+            "MAIL FROM: ",
+            "MAIL FROM:  SIZE=10",
+            "RCPT TO:",
+            "RCPT TO: ",
+        ] {
+            let r = parse(bad);
+            assert!(r.is_err(), "{bad:?} gave {r:?}");
+        }
+        assert_eq!(
+            parse("MAIL FROM:"),
+            Err(Error::InvalidSender("missing path"))
+        );
+        // Bare paths still have to be valid mailboxes.
+        for bad in [
+            "MAIL FROM:user",
+            "MAIL FROM:a@b>",
+            "RCPT TO:<a@b",
+            "RCPT TO:a b@c",
+            "MAIL FROM:@x:y",
+        ] {
+            assert!(parse(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

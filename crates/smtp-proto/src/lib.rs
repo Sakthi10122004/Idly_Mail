@@ -21,7 +21,7 @@ pub mod params;
 pub mod reply;
 
 pub use address::{ForwardPath, Host, Mailbox, ReversePath};
-pub use command::{ClientName, Command, InitialResponse};
+pub use command::{ClientName, Command, InitialResponse, Signals};
 pub use data::{DataDecoder, Progress};
 pub use ehlo::{Capability, EhloResponse};
 pub use error::{EnhancedCode, Error};
