@@ -1,0 +1,1 @@
+v=spf1 mx include:mobile-users._spf.%{d} include:remote-users._spf.%{d} -all

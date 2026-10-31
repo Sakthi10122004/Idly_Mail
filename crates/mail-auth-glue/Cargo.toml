@@ -17,10 +17,10 @@ base64.workspace = true
 # ring. See CLAUDE.md and the RUSTSEC-2023-0071 note in deny.toml.
 rsa.workspace = true
 rand_core.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
 dns = { workspace = true, features = ["testing"] }
-tokio.workspace = true
 
 [lints]
 workspace = true

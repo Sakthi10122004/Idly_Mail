@@ -13,7 +13,7 @@ libfuzzer-sys = "0.4"
 smtp-proto = { path = "../crates/smtp-proto" }
 mail-auth-glue = { path = "../crates/mail-auth-glue" }
 dns = { path = "../crates/dns", features = ["testing"] }
-tokio = { version = "1", default-features = false, features = ["rt"] }
+tokio = { version = "1", default-features = false, features = ["rt", "time"] }
 
 # Kept out of the main workspace: the fuzz harness is never linked into idly.
 [workspace]
@@ -65,6 +65,13 @@ bench = false
 [[bin]]
 name = "dkim_verify"
 path = "fuzz_targets/dkim_verify.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "spf_record"
+path = "fuzz_targets/spf_record.rs"
 test = false
 doc = false
 bench = false

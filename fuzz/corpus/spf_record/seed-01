@@ -1,0 +1,1 @@
+v=spf1 a/24//64 mx:example.com/30 ptr:%{p} ip4:192.0.2.0/24 ip6:2001:db8::/32 exists:%{ir}.%{l1r+-}.%{d} include:inc.example.com ~all exp=x.%{d} redirect=loop.example.com

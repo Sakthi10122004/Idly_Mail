@@ -7,4 +7,5 @@
 
 pub mod dkim;
 pub mod message;
+pub mod spf;
 pub mod tags;

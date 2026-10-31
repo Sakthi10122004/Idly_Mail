@@ -28,10 +28,20 @@ grouped by development phase (see the roadmap in [README.md](README.md)).
   - Checked against the official RFC 8463 test vectors: both published
     signatures verify, and our signer reproduces the published Ed25519
     signature byte for byte.
+- **SPF** (RFC 7208): the full `check_host()` evaluation, run through
+  our own DNS resolver.
+  - All mechanisms and modifiers, including macros, `include`, `redirect`
+    and `ptr`.
+  - The RFC's limits: 10 DNS-querying terms, 2 void lookups, 10 MX or PTR
+    names, and a 20-second time limit.
+  - The null sender is checked as `postmaster@<HELO name>`.
+  - Checked against the RFC's official §7.4 macro examples and
+    Appendix A example zones.
 - **Message parsing** for authentication: header fields kept exactly as
   received, and the domains of the From field (with display names,
   comments, quoted strings and groups).
-- **Fuzz targets** `message_parse` and `dkim_verify`, also run in CI.
+- **Fuzz targets** `message_parse`, `dkim_verify` and `spf_record`, also
+  run in CI.
 - **Local demo:** `idly serve --demo` receives mail and writes it to
   Maildir.
   - It only listens on 127.0.0.1 and refuses to start with any other
