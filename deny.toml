@@ -41,6 +41,9 @@ deny = [
     # OpenSSL license.
     { crate = "aws-lc-rs", reason = "use ring; aws-lc includes OpenSSL-licensed code" },
     { crate = "aws-lc-sys", reason = "use ring; aws-lc includes OpenSSL-licensed code" },
+    # Abandoned, unbuildable, and has RUSTSEC-2026-0106 (cache poisoning).
+    # Use hickory-resolver's `recursor` feature instead.
+    { crate = "hickory-recursor", reason = "RUSTSEC-2026-0106; use hickory-resolver/recursor" },
     # CDLA-Permissive-2.0 data license is not on the allow-list.
     { crate = "webpki-roots", reason = "use rustls-native-certs" },
     # Hard constraint 1: no relays, no third-party mail APIs.

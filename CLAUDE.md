@@ -88,8 +88,11 @@ Principle: **lenient on harmless syntax, strict on framing.**
   limited to that use. Mail is dual-signed RSA + Ed25519 (RFC 8463).
 - One crypto stack: `ring`. `aws-lc-rs`/`aws-lc-sys` are banned, and so is
   `webpki-roots` (CDLA license); use `rustls-native-certs`.
-- DNS: `hickory-recursor`, pinned to an exact version, behind the `dns`
-  crate's `Resolver` trait. A static test resolver exists only in tests and
+- DNS: `hickory-resolver` with its `recursor` and `dnssec-ring` features,
+  pinned to an exact version, behind the `dns` crate's `Resolver` trait.
+  (The standalone `hickory-recursor` crate is abandoned, doesn't build, and
+  has RUSTSEC-2026-0106, a cache-poisoning bug fixed only in
+  hickory-resolver's recursor. Never use it.) A static test resolver exists only in tests and
   the dev-only `testing` feature, never in the release binary.
 - Phase 1 delivers local inbound mail to Maildir; Phase 2 imports it.
 - No relay, structurally: delivery targets come only from DNS
