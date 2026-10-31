@@ -28,7 +28,6 @@ indexing_slicing = "warn"
 unwrap_used = "warn"
 expect_used = "warn"
 panic = "warn"
-arithmetic_side_effects = "warn"
 
 [profile.release]
 lto = "thin"

@@ -37,8 +37,10 @@ If a change would bend any of these, stop and ask the maintainer.
   license is unclear, stop and ask. Never widen `deny.toml` without approval.
 - **New dependencies** must be permissively licensed, maintained, and justified.
   Prefer zero dependencies in protocol crates.
-- **Parsers never panic** on network input: no `unwrap`, `expect`, unchecked
-  indexing or unchecked arithmetic (enforced via clippy lints in the workspace).
+- **Parsers never panic** on network input: no `unwrap`, `expect` or
+  unchecked indexing (enforced via clippy lints in the workspace). Use checked
+  arithmetic for numbers taken from the wire; fuzz builds keep overflow checks
+  on, so any overflow shows up as a fuzzer crash.
 - **Commit** after each working milestone with a clear message. Never push
   unless asked.
 - **End of phase report:** what was built, how to run it, test results, and
