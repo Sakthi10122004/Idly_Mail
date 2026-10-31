@@ -10,8 +10,9 @@
 /// Maximum command line, CRLF included. RFC 5321 §4.5.3.1.4.
 pub const COMMAND_LINE: usize = 512;
 
-/// Maximum AUTH command line. RFC 4954 §4 requires servers to accept at
-/// least 12288 octets for an AUTH command with an initial response.
+/// Maximum AUTH command line. RFC 4954 §4 requires handling the largest
+/// encoded responses of the supported mechanisms, and notes that 12288
+/// octets is considered sufficient for deployed mechanisms.
 pub const AUTH_COMMAND_LINE: usize = 12288;
 
 /// Maximum reply line, CRLF included. RFC 5321 §4.5.3.1.5.

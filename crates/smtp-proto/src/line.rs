@@ -109,7 +109,8 @@ mod tests {
 
     #[test]
     fn partial_line_over_limit_rejected_early() {
-        // RFC 5321 §4.5.3.1.4: don't buffer without bound waiting for CRLF.
+        // RFC 5321 §4.5.3.1.4 limits the line length, so reject as soon as the
+        // limit is passed instead of buffering until a CRLF arrives.
         assert_eq!(
             split_line(&[b'a'; MAX - 1], MAX),
             Err(Error::LineTooLong { limit: MAX })

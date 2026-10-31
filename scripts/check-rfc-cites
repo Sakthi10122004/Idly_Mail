@@ -1,0 +1,120 @@
+#!/usr/bin/env python3
+"""Check that every "RFC NNNN §X.Y" citation in the source tree names a
+section that exists in that RFC.
+
+    scripts/check-rfc-cites            check (RFCs must be in docs/rfc/)
+    scripts/check-rfc-cites --fetch    download missing RFCs, then check
+    scripts/check-rfc-cites --list     print every citation with its location
+    scripts/check-rfc-cites --show 5321 4.1.1.4
+                                       print the text of one section
+
+RFC texts come from https://www.rfc-editor.org/rfc/rfcNNNN.txt and are
+stored in docs/rfc/ (gitignored). Standard library only.
+"""
+
+import re
+import sys
+import urllib.request
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+RFC_DIR = ROOT / "docs" / "rfc"
+SCAN = [ROOT / "crates", ROOT / "fuzz" / "fuzz_targets"]
+EXTENSIONS = {".rs"}
+
+# "RFC 5321" followed by one or more "§X.Y" references, e.g.
+# "RFC 5321 §2.3.8, §4.1.1.4" or "RFC 3463 §3.2 (addressing) and §3.6".
+# References after a later "RFC NNNN" belong to that RFC instead.
+RFC_RE = re.compile(r"RFC ?(\d{3,5})")
+SECTION_RE = re.compile(r"§(\d+(?:\.\d+)*)")
+# A section heading in an RFC body: section number at column 0, optional
+# trailing dot, whitespace, then the title. TOC entries are indented, so
+# they don't count.
+HEADING_RE = re.compile(r"^(\d+(?:\.\d+)*)\.?\s+\S")
+# Running page header and footer lines in plain-text RFCs.
+PAGE_RE = re.compile(r"^(RFC \d+ .*\d{4}$|.*\[Page \d+\]$|\f)")
+
+
+def citations():
+    """Yield (path, line_no, rfc, section, line_text)."""
+    for base in SCAN:
+        for path in sorted(base.rglob("*")):
+            if path.suffix not in EXTENSIONS or "target" in path.parts:
+                continue
+            for no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                rfcs = list(RFC_RE.finditer(line))
+                for i, m in enumerate(rfcs):
+                    end = rfcs[i + 1].start() if i + 1 < len(rfcs) else len(line)
+                    for s in SECTION_RE.finditer(line, m.end(), end):
+                        yield path.relative_to(ROOT), no, m.group(1), s.group(1), line.strip()
+
+
+def rfc_path(rfc):
+    return RFC_DIR / f"rfc{rfc}.txt"
+
+
+def fetch(rfcs):
+    RFC_DIR.mkdir(parents=True, exist_ok=True)
+    for rfc in sorted(rfcs, key=int):
+        dest = rfc_path(rfc)
+        if dest.exists():
+            continue
+        url = f"https://www.rfc-editor.org/rfc/rfc{rfc}.txt"
+        print(f"fetching {url}", file=sys.stderr)
+        with urllib.request.urlopen(url, timeout=60) as resp:
+            dest.write_bytes(resp.read())
+
+
+_sections = {}
+
+
+def sections(rfc):
+    """Map section number -> list of body lines, for one RFC."""
+    if rfc not in _sections:
+        out, current = {}, None
+        for line in rfc_path(rfc).read_text(encoding="utf-8", errors="replace").splitlines():
+            if PAGE_RE.match(line):
+                continue
+            m = HEADING_RE.match(line)
+            if m:
+                current = m.group(1)
+                out.setdefault(current, [])
+            if current is not None:
+                out[current].append(line)
+        _sections[rfc] = out
+    return _sections[rfc]
+
+
+def main(argv):
+    if "--show" in argv:
+        i = argv.index("--show")
+        rfc, sec = argv[i + 1], argv[i + 2]
+        print("\n".join(sections(rfc).get(sec, [f"RFC {rfc} has no section {sec}"])))
+        return 0
+
+    cites = list(citations())
+    if "--list" in argv:
+        for path, no, rfc, sec, text in cites:
+            print(f"{path}:{no}: RFC {rfc} §{sec}: {text}")
+        return 0
+
+    rfcs = {c[2] for c in cites}
+    if "--fetch" in argv:
+        fetch(rfcs)
+    missing = [r for r in rfcs if not rfc_path(r).exists()]
+    if missing:
+        print(f"missing RFC texts: {', '.join(sorted(missing, key=int))}; run with --fetch",
+              file=sys.stderr)
+        return 2
+
+    bad = 0
+    for path, no, rfc, sec, _ in cites:
+        if sec not in sections(rfc):
+            print(f"{path}:{no}: RFC {rfc} has no section {sec}")
+            bad += 1
+    print(f"{len(cites)} citations of {len(rfcs)} RFCs checked, {bad} invalid", file=sys.stderr)
+    return 1 if bad else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

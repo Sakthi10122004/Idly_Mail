@@ -46,6 +46,43 @@ If a change would bend any of these, stop and ask the maintainer.
 - **End of phase report:** what was built, how to run it, test results, and
   what is left.
 
+## Protocol policy decisions (maintainer-approved, 2026-10-31)
+
+Principle: **lenient on harmless syntax, strict on framing.**
+
+- **Framing is never relaxed.** Only CRLF ends a line; only `CRLF.CRLF`
+  ends DATA. There is no setting to change this.
+- **MAIL FROM / RCPT TO:** a space after the colon is accepted, even though
+  RFC 5321 §3.3 forbids it.
+- **Invalid EHLO/HELO name:** accepted, never rejected. The session records
+  it as a signal for the Phase 3 spam scorer.
+- **Long lines:**
+  - Inbound (port 25): accepted up to a configurable hard cap (default
+    64 KiB per line) for memory safety.
+  - Submission: lines over 998 octets are re-encoded as quoted-printable
+    BEFORE DKIM signing, so Idly Mail never sends a non-compliant message.
+- **Command lines:** the local-part (64) and path (256) limits are not
+  enforced, but total command-line length has a configurable hard cap
+  (default 4 KiB; AUTH lines up to 12288 octets per RFC 4954 §4).
+- **Bare CR or LF in DATA:**
+  - reply `5xx 5.5.2` and close the connection;
+  - discard the partial message (it must never be queued);
+  - log the client IP with reason `smuggling-attempt` for later reputation
+    use.
+
+  An integration test must prove that the message is not queued.
+- **Server replies (client side):** reply codes and framing are strict;
+  text and unknown EHLO keywords are read leniently.
+- **Internationalized domains:** validated and converted with the `idna`
+  crate (UTS #46 / IDNA2008).
+
+## RFC citations
+
+Cite as `RFC NNNN §X.Y`. `scripts/check-rfc-cites --fetch` (also run in CI)
+downloads the RFCs into `docs/rfc/` (gitignored) and fails if a cited
+section does not exist. `--show NNNN X.Y` prints a section, so you can check
+that the rule matches the text.
+
 ## Architecture (Cargo workspace)
 
 | Crate | Role | Phase |

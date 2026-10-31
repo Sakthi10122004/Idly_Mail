@@ -28,7 +28,7 @@ pub enum Capability {
     BinaryMime,
     /// `CHUNKING` (BDAT). RFC 3030 §2.
     Chunking,
-    /// `DSN`. RFC 3461 §4.
+    /// `DSN`. RFC 3461 §2.
     Dsn,
     /// `ENHANCEDSTATUSCODES`. RFC 2034 §3.
     EnhancedStatusCodes,
@@ -37,7 +37,7 @@ pub enum Capability {
     /// `REQUIRETLS`. RFC 8689 §2.
     RequireTls,
     /// `SIZE [n]`, the maximum message size; 0 or absent means no fixed
-    /// limit is announced. RFC 1870 §4.
+    /// limit is announced. RFC 1870 §3.
     Size(Option<u64>),
     /// `SMTPUTF8`. RFC 6531 §3.2.
     SmtpUtf8,
@@ -73,7 +73,7 @@ impl Capability {
             "REQUIRETLS" => Self::RequireTls,
             "SMTPUTF8" => Self::SmtpUtf8,
             "STARTTLS" => Self::StartTls,
-            // RFC 1870 §4: size-param ::= [1*DIGIT]
+            // RFC 1870 §3: size-param ::= [1*DIGIT]
             "SIZE" => match params.as_slice() {
                 [] => Self::Size(None),
                 [n] if n.bytes().all(|b| b.is_ascii_digit()) => {

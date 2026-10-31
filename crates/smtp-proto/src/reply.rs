@@ -7,8 +7,9 @@
 //! Reply-code = %x32-35 %x30-35 %x30-39
 //! ```
 //! The code and the line framing are checked strictly. The text is not:
-//! RFC 5321 §4.2 says a client acts only on the reply code, never on the
-//! text, so odd text should not make delivery fail. Text that is not UTF-8
+//! RFC 5321 §4.2 says a client MUST act on the reply code, not the text
+//! (except 251/551 and, if necessary, 220/221/421), and that any text MUST
+//! be acceptable, so odd text should not make delivery fail. Text that is not UTF-8
 //! is decoded lossily.
 
 use crate::error::{EnhancedCode, Error};
@@ -171,7 +172,8 @@ fn strip_enhanced(code: u16, lines: &mut [String]) -> Option<EnhancedCode> {
     for line in lines.iter() {
         let token = line.split(' ').next().unwrap_or_default();
         let e = parse_enhanced(token)?;
-        // The class (RFC 3463 §2) must agree with the reply code's first digit.
+        // The class (RFC 3463 §2) must agree with the reply code's first digit,
+        // and every line must carry the same code (RFC 2034 §4).
         if u16::from(e.class) != code / 100 || found.is_some_and(|f| f != e) {
             return None;
         }

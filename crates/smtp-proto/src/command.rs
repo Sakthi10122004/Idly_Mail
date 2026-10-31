@@ -255,7 +255,7 @@ fn parse_bdat(args: &str) -> Result<Command, Error> {
     Ok(Command::Bdat { size, last })
 }
 
-/// RFC 4954 §4: `"AUTH" SP sasl-mech [SP initial-response]`,
+/// RFC 4954 §8: `"AUTH" SP sasl-mech [SP initial-response]`,
 /// `initial-response = base64 / "="`.
 fn parse_auth(args: &str) -> Result<Command, Error> {
     let (mechanism, response) = match args.split_once(' ') {

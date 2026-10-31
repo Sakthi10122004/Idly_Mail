@@ -58,6 +58,14 @@ jobs:
           manifest-path: ${{ matrix.manifest }}
           command: check advisories bans licenses sources
 
+  rfc-cites:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Downloads every cited RFC from rfc-editor.org, then checks that each
+      # "RFC NNNN §X.Y" comment names a section that exists.
+      - run: python3 scripts/check-rfc-cites --fetch
+
   audit:
     runs-on: ubuntu-latest
     steps:

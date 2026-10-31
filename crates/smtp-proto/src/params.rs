@@ -63,7 +63,7 @@ pub enum Notify {
 /// A MAIL FROM parameter.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum MailParam {
-    /// `SIZE=n`. RFC 1870 §6. Values too large for `u64` saturate.
+    /// `SIZE=n`. RFC 1870 §3. Values too large for `u64` saturate.
     Size(u64),
     /// `BODY=`. RFC 6152 §2, RFC 3030 §3.
     Body(BodyType),
@@ -150,7 +150,7 @@ pub(crate) fn parse_mail_params(s: &str) -> Result<Vec<MailParam>, Error> {
         .map(|(k, v)| {
             let k_up = k.to_ascii_uppercase();
             Ok(match (k_up.as_str(), v) {
-                // RFC 1870 §6: size-value ::= 1*20DIGIT
+                // RFC 1870 §3: size-value ::= 1*20DIGIT
                 ("SIZE", Some(v)) => {
                     if v.len() > 20 || !v.bytes().all(|b| b.is_ascii_digit()) {
                         return Err(Error::InvalidParameter("SIZE must be 1 to 20 digits"));
@@ -460,7 +460,7 @@ mod tests {
 
     #[test]
     fn size_saturates() {
-        // 20 digits are allowed by RFC 1870 §6 but exceed u64.
+        // 20 digits are allowed by RFC 1870 §3 but exceed u64.
         assert_eq!(
             parse_mail_params("SIZE=99999999999999999999").unwrap(),
             vec![MailParam::Size(u64::MAX)]

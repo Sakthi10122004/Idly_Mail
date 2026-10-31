@@ -155,7 +155,8 @@ fn parse_path(c: &mut Cursor<'_>) -> Result<Mailbox, Error> {
         return Err(Error::InvalidAddress("path must be enclosed in <>"));
     }
     // RFC 5321 §4.1.2: A-d-l = At-domain *( "," At-domain ).
-    // A source route MUST be accepted and SHOULD be ignored: RFC 5321 §3.3
+    // RFC 5321 §4.1.2 (note on A-d-l): a source route "MUST BE accepted,
+    // SHOULD NOT be generated, and SHOULD be ignored". See also RFC 5321 §3.3
     // and Appendix C. We parse it and drop it.
     if c.peek() == Some('@') {
         loop {
@@ -274,7 +275,7 @@ fn is_u_label_char(c: char) -> bool {
     !c.is_ascii() && !c.is_control() && !c.is_whitespace()
 }
 
-/// RFC 5321 §4.1.3:
+/// RFC 5321 §4.1.2 (alternatives defined in RFC 5321 §4.1.3):
 /// `address-literal = "[" ( IPv4-address-literal / IPv6-address-literal /
 /// General-address-literal ) "]"`.
 fn parse_address_literal(c: &mut Cursor<'_>) -> Result<Host, Error> {

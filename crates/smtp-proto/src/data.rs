@@ -141,9 +141,12 @@ impl DataDecoder {
                 return Ok(false);
             }
         };
-        self.line_len = self.line_len.saturating_add(1);
-        // RFC 5321 §4.5.3.1.6: line length includes the CRLF. A line whose
-        // content has reached max - 1 octets can't end within the limit.
+        // RFC 5321 §4.5.3.1.6: line length includes the CRLF but not "the
+        // leading dot duplicated for transparency". A line whose content has
+        // reached max - 1 octets can't end within the limit.
+        if state != State::Dot {
+            self.line_len = self.line_len.saturating_add(1);
+        }
         if let Some(max) = self.max_line {
             let pending_crlf = if matches!(state, State::Cr | State::DotCr) {
                 1
@@ -338,9 +341,14 @@ mod tests {
             decode(&long).0,
             Err(Error::LineTooLong { limit: TEXT_LINE })
         );
-        // The stuffed period counts: it is transmitted.
+        // RFC 5321 §4.5.3.1.6: the leading dot duplicated for transparency
+        // does not count, so "." + 998 octets + CRLF is a legal line.
         let mut stuffed = vec![b'.'; 1];
         stuffed.extend(vec![b'x'; TEXT_LINE - 2]);
+        stuffed.extend_from_slice(b"\r\n.\r\n");
+        assert!(matches!(decode(&stuffed).0, Ok(Progress::Done { .. })));
+        let mut stuffed = vec![b'.'; 1];
+        stuffed.extend(vec![b'x'; TEXT_LINE - 1]);
         stuffed.extend_from_slice(b"\r\n.\r\n");
         assert_eq!(
             decode(&stuffed).0,

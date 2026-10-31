@@ -41,7 +41,8 @@ pub enum Error {
     BareCr,
     /// An LF not preceded by CR. RFC 5321 §2.3.8, §4.1.1.4.
     BareLf,
-    /// The line exceeds `limit` octets, CRLF included. RFC 5321 §4.5.3.1.
+    /// The line exceeds `limit` octets, CRLF included. RFC 5321 §4.5.3.1.4
+    /// (command line), RFC 5321 §4.5.3.1.6 (text line).
     LineTooLong {
         /// The limit that was exceeded.
         limit: usize,
