@@ -37,6 +37,12 @@ deny = [
     { crate = "native-tls", reason = "TLS must use rustls" },
     { crate = "tokio-native-tls", reason = "TLS must use rustls" },
     { crate = "hyper-tls", reason = "TLS must use rustls" },
+    # Single crypto stack: ring (see CLAUDE.md). aws-lc carries the
+    # OpenSSL license.
+    { crate = "aws-lc-rs", reason = "use ring; aws-lc includes OpenSSL-licensed code" },
+    { crate = "aws-lc-sys", reason = "use ring; aws-lc includes OpenSSL-licensed code" },
+    # CDLA-Permissive-2.0 data license is not on the allow-list.
+    { crate = "webpki-roots", reason = "use rustls-native-certs" },
     # Hard constraint 1: no relays, no third-party mail APIs.
     { crate = "lettre", reason = "ships smarthost/relay transports; we deliver direct to MX" },
     { crate = "sendgrid", reason = "third-party mail API" },

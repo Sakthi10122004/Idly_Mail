@@ -41,8 +41,10 @@ If a change would bend any of these, stop and ask the maintainer.
   unchecked indexing (enforced via clippy lints in the workspace). Use checked
   arithmetic for numbers taken from the wire; fuzz builds keep overflow checks
   on, so any overflow shows up as a fuzzer crash.
-- **Commit** after each working milestone with a clear message. Never push
-  unless asked.
+- **Commit** after each working milestone with a clear message. **Never
+  `git push`**: the maintainer pushes. **No AI attribution in commits**: no
+  `Co-Authored-By: Claude` (or similar) trailer, so no AI tool shows up as a
+  contributor.
 - **End of phase report:** what was built, how to run it, test results, and
   what is left.
 
@@ -75,6 +77,24 @@ Principle: **lenient on harmless syntax, strict on framing.**
   text and unknown EHLO keywords are read leniently.
 - **Internationalized domains:** validated and converted with the `idna`
   crate (UTS #46 / IDNA2008).
+
+## Phase 1 design decisions (maintainer-approved, 2026-10-31)
+
+- SPF, DKIM and DMARC are our own code in `mail-auth-glue`: crypto via
+  `ring`, all DNS through our resolver. Do not depend on Stalwart's
+  `mail-auth`.
+- DKIM keys: the `rsa` crate is used **only** for RSA key generation in the
+  CLI; signing and verification use `ring`. The RUSTSEC-2023-0071 ignore is
+  limited to that use. Mail is dual-signed RSA + Ed25519 (RFC 8463).
+- One crypto stack: `ring`. `aws-lc-rs`/`aws-lc-sys` are banned, and so is
+  `webpki-roots` (CDLA license); use `rustls-native-certs`.
+- DNS: `hickory-recursor`, pinned to an exact version, behind the `dns`
+  crate's `Resolver` trait. A static test resolver exists only in tests and
+  the dev-only `testing` feature, never in the release binary.
+- Phase 1 delivers local inbound mail to Maildir; Phase 2 imports it.
+- No relay, structurally: delivery targets come only from DNS
+  (`mx_targets`). No config key or flag may name a delivery host.
+  `--test-mode` can only *restrict* delivery to an allow-list.
 
 ## RFC citations
 
