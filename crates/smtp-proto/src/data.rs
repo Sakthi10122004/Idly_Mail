@@ -398,4 +398,19 @@ mod tests {
         );
         assert_eq!(out, msg);
     }
+
+    #[test]
+    fn inbound_line_cap() {
+        use crate::limits::DEFAULT_INBOUND_TEXT_LINE_CAP as CAP;
+        let run = |len: usize| {
+            let mut wire = vec![b'x'; len];
+            wire.extend_from_slice(b"\r\n.\r\n");
+            DataDecoder::new(Some(CAP)).decode(&wire, &mut Vec::new())
+        };
+        // Over the RFC 1000 octets but under the policy cap: accepted.
+        assert!(matches!(run(10_000), Ok(Progress::Done { .. })));
+        assert!(matches!(run(CAP - 2), Ok(Progress::Done { .. })));
+        assert_eq!(run(CAP - 1), Err(Error::LineTooLong { limit: CAP }));
+        assert_eq!(run(70_000), Err(Error::LineTooLong { limit: CAP }));
+    }
 }

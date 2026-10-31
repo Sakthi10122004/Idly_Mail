@@ -12,6 +12,7 @@ publish = false
 
 [workspace.dependencies]
 smtp-proto = { path = "crates/smtp-proto" }
+idna = { version = "1", default-features = false, features = ["std", "compiled_data"] }
 clap = { version = "4", default-features = false, features = ["std", "help", "usage", "error-context", "derive"] }
 proptest = { version = "1", default-features = false, features = ["std"] }
 

@@ -41,6 +41,15 @@ impl Host {
         Ok(host)
     }
 
+    /// The domain in ASCII (A-label) form, for DNS lookups; `None` for
+    /// address literals.
+    pub fn ascii_domain(&self) -> Option<Result<String, Error>> {
+        match self {
+            Self::Domain(d) => Some(domain_to_ascii(d)),
+            _ => None,
+        }
+    }
+
     /// Whether the host is plain ASCII (always true for address literals).
     pub fn is_ascii(&self) -> bool {
         match self {
@@ -238,14 +247,15 @@ fn parse_host(c: &mut Cursor<'_>) -> Result<Host, Error> {
 /// RFC 5321 §4.1.2: `Domain = sub-domain *("." sub-domain)`, where
 /// `sub-domain = Let-dig [Ldh-str]`, and RFC 6531 §3.3 adds U-labels.
 ///
-/// We do not run full IDNA2008 validation on U-labels. Non-ASCII characters
-/// are accepted in the positions of letters and digits, except for control
-/// and whitespace characters, which IDNA never allows.
+/// A domain with a non-ASCII or `xn--` label is validated with UTS #46 /
+/// IDNA2008 rules (see [`domain_to_ascii`]). Length limits apply to the
+/// ASCII (A-label) form, since that is what goes into DNS.
 pub(crate) fn parse_domain(c: &mut Cursor<'_>) -> Result<String, Error> {
     let start = c.rest();
+    let mut idn = false;
     loop {
-        let label = c.take_while(|ch| is_ldh(ch) || is_u_label_char(ch));
-        let ends_ok = |ch: Option<char>| ch.is_some_and(|ch| is_let_dig(ch) || is_u_label_char(ch));
+        let label = c.take_while(|ch| is_ldh(ch) || !ch.is_ascii());
+        let ends_ok = |ch: Option<char>| ch.is_some_and(|ch| is_let_dig(ch) || !ch.is_ascii());
         if label.is_empty() {
             return Err(Error::InvalidAddress("empty domain label"));
         }
@@ -255,8 +265,14 @@ pub(crate) fn parse_domain(c: &mut Cursor<'_>) -> Result<String, Error> {
                 "domain label starts or ends with '-'",
             ));
         }
-        // RFC 1035 §2.3.4: labels are 63 octets or less.
-        if label.len() > limits::LABEL {
+        if !label.is_ascii()
+            || label
+                .get(..4)
+                .is_some_and(|p| p.eq_ignore_ascii_case("xn--"))
+        {
+            idn = true;
+        } else if label.len() > limits::LABEL {
+            // RFC 1035 §2.3.4: labels are 63 octets or less.
             return Err(Error::InvalidAddress("domain label longer than 63 octets"));
         }
         if !c.eat('.') {
@@ -264,15 +280,32 @@ pub(crate) fn parse_domain(c: &mut Cursor<'_>) -> Result<String, Error> {
         }
     }
     let domain = c.since(start);
-    // RFC 5321 §4.5.3.1.2; RFC 1035 §2.3.4.
-    if domain.len() > limits::DOMAIN {
+    if idn {
+        // Checks label and total lengths on the A-label form.
+        domain_to_ascii(domain)?;
+    } else if domain.len() > limits::DOMAIN {
+        // RFC 1035 §2.3.4: names are 255 octets or less.
         return Err(Error::InvalidAddress("domain longer than 255 octets"));
     }
     Ok(domain.to_owned())
 }
 
-fn is_u_label_char(c: char) -> bool {
-    !c.is_ascii() && !c.is_control() && !c.is_whitespace()
+/// Converts a domain to its ASCII form (A-labels), validating it with UTS #46
+/// processing under IDNA2008 rules: STD3 ASCII rules, hyphen checks, and DNS
+/// length limits (RFC 5890 §2.3.2.1 defines U-labels and A-labels). An
+/// all-ASCII domain without `xn--` labels is returned lower-cased.
+pub fn domain_to_ascii(domain: &str) -> Result<String, Error> {
+    idna::domain_to_ascii_strict(domain)
+        .map_err(|_| Error::InvalidAddress("invalid internationalized domain name"))
+}
+
+/// Converts a domain to its Unicode form (U-labels) for display. Returns an
+/// error if the domain is not valid under UTS #46 / IDNA2008.
+pub fn domain_to_unicode(domain: &str) -> Result<String, Error> {
+    domain_to_ascii(domain)?;
+    let (unicode, result) = idna::domain_to_unicode(domain);
+    result.map_err(|_| Error::InvalidAddress("invalid internationalized domain name"))?;
+    Ok(unicode)
 }
 
 /// RFC 5321 §4.1.2 (alternatives defined in RFC 5321 §4.1.3):
@@ -411,6 +444,57 @@ mod tests {
         assert_eq!(max.len(), 255);
         assert!(Host::parse(&max).is_ok());
         assert!(Host::parse(&format!("a{max}")).is_err());
+    }
+
+    #[test]
+    fn idn_domains_validated() {
+        // UTS #46 / IDNA2008 via the idna crate.
+        for ok in [
+            "bücher.example",
+            "例子.广告",
+            "எடுத்துக்காட்டு.இந்தியா",
+            "xn--bcher-kva.example",
+        ] {
+            assert!(Host::parse(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "xn--zz-.example",     // ends in hyphen
+            "xn--a.example",       // invalid punycode
+            "a\u{a0}b.example",    // NBSP is not allowed
+            "a\u{85}b.example",    // C1 control
+            "☃\u{200d}.example",   // ZWJ outside a valid context (CONTEXTJ)
+            "\u{0301}abc.example", // label starts with a combining mark
+            "xn--bcher-kva-.example",
+        ] {
+            assert!(Host::parse(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn idn_length_uses_a_label_form() {
+        // 30 CJK characters: 90 UTF-8 octets, but the A-label is short.
+        let label = "例".repeat(30);
+        assert!(label.len() > 63);
+        assert!(Host::parse(&format!("{label}.example")).is_ok());
+        // Too long once converted: 63 octets is the A-label limit.
+        let long = "ü".repeat(70);
+        assert!(Host::parse(&format!("{long}.example")).is_err());
+    }
+
+    #[test]
+    fn idn_conversion() {
+        assert_eq!(
+            domain_to_ascii("Bücher.Example").unwrap(),
+            "xn--bcher-kva.example"
+        );
+        assert_eq!(
+            domain_to_unicode("xn--bcher-kva.example").unwrap(),
+            "bücher.example"
+        );
+        assert_eq!(domain_to_ascii("Example.ORG").unwrap(), "example.org");
+        let h = Host::parse("bücher.example").unwrap();
+        assert_eq!(h.ascii_domain(), Some(Ok("xn--bcher-kva.example".into())));
+        assert_eq!(Host::parse("[192.0.2.1]").unwrap().ascii_domain(), None);
     }
 
     #[test]

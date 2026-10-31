@@ -123,4 +123,27 @@ mod tests {
         cr.push(b'\r');
         assert_eq!(split_line(&cr, MAX), Err(Error::LineTooLong { limit: MAX }));
     }
+
+    #[test]
+    fn default_command_line_cap() {
+        use crate::limits::DEFAULT_COMMAND_LINE_CAP as CAP;
+        // A command over the RFC 512 octets but under the policy cap passes.
+        let mut ok = format!("RCPT TO:<{}@example.org>", "a".repeat(1000)).into_bytes();
+        ok.extend_from_slice(b"\r\n");
+        assert!(matches!(split_line(&ok, CAP), Ok(Some(_))));
+        let mut at = vec![b'a'; CAP - 2];
+        at.extend_from_slice(b"\r\n");
+        assert!(matches!(split_line(&at, CAP), Ok(Some(_))));
+        // One octet over is rejected, even before the CRLF arrives.
+        let mut over = vec![b'a'; CAP - 1];
+        over.extend_from_slice(b"\r\n");
+        assert_eq!(
+            split_line(&over, CAP),
+            Err(Error::LineTooLong { limit: CAP })
+        );
+        assert_eq!(
+            split_line(&vec![b'a'; CAP], CAP),
+            Err(Error::LineTooLong { limit: CAP })
+        );
+    }
 }

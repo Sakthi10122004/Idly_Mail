@@ -10,6 +10,17 @@
 /// Maximum command line, CRLF included. RFC 5321 §4.5.3.1.4.
 pub const COMMAND_LINE: usize = 512;
 
+/// Default hard cap on a command line, CRLF included. A policy limit
+/// (CLAUDE.md), not an RFC one: well above the 512 octets of
+/// RFC 5321 §4.5.3.1.4 so long MAIL/RCPT paths and parameters fit, but small
+/// enough to bound memory. Configurable in the server.
+pub const DEFAULT_COMMAND_LINE_CAP: usize = 4096;
+
+/// Default hard cap on an inbound (port 25) DATA line, CRLF included. A
+/// policy limit (CLAUDE.md) for memory safety: real-world mail sometimes
+/// exceeds the 1000 octets of RFC 5321 §4.5.3.1.6. Configurable.
+pub const DEFAULT_INBOUND_TEXT_LINE_CAP: usize = 64 * 1024;
+
 /// Maximum AUTH command line. RFC 4954 §4 requires handling the largest
 /// encoded responses of the supported mechanisms, and notes that 12288
 /// octets is considered sufficient for deployed mechanisms.

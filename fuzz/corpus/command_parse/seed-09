@@ -1,0 +1,7 @@
+EHLO bücher.example
+MAIL FROM: <用户@例子.广告> SMTPUTF8
+RCPT TO:<சக்தி@எடுத்துக்காட்டு.இந்தியா>
+RCPT TO:<a@xn--bcher-kva.example>
+RCPT TO:<a@xn--a.example>
+EHLO under_score
+HELO [192.0.2.1]

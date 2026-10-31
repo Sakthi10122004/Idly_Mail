@@ -94,8 +94,15 @@ fn atom_or_quoted() -> impl Strategy<Value = String> {
 
 fn command() -> impl Strategy<Value = Command> {
     prop_oneof![
-        domain().prop_map(|domain| Command::Helo { domain }),
-        host().prop_map(|host| Command::Ehlo { host }),
+        domain().prop_map(|d| Command::Helo {
+            name: ClientName::Valid(Host::Domain(d))
+        }),
+        host().prop_map(|h| Command::Ehlo {
+            name: ClientName::Valid(h)
+        }),
+        "[a-z_ ]{0,12}_[a-z ]{0,5}".prop_map(|s| Command::Ehlo {
+            name: ClientName::Invalid(s)
+        }),
         (
             prop_oneof![
                 Just(ReversePath::Null),

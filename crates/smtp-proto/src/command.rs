@@ -23,18 +23,47 @@ pub enum InitialResponse {
     Base64(String),
 }
 
+/// The name a client gives in HELO or EHLO.
+///
+/// Policy (CLAUDE.md): an invalid name is accepted, never rejected. The
+/// session records it as a signal for the spam scorer.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ClientName {
+    /// A name that matches the grammar: a Domain for HELO, a Domain or
+    /// address-literal for EHLO. RFC 5321 §4.1.1.1.
+    Valid(Host),
+    /// Anything else, as sent (possibly empty).
+    Invalid(String),
+}
+
+impl ClientName {
+    /// Whether the name matched the RFC 5321 grammar.
+    pub fn is_valid(&self) -> bool {
+        matches!(self, Self::Valid(_))
+    }
+}
+
+impl core::fmt::Display for ClientName {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Valid(h) => h.fmt(f),
+            Self::Invalid(s) => f.write_str(s),
+        }
+    }
+}
+
 /// An SMTP command.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Command {
     /// `HELO SP Domain`. RFC 5321 §4.1.1.1.
     Helo {
-        /// The client's domain.
-        domain: String,
+        /// The client's name.
+        name: ClientName,
     },
     /// `EHLO SP ( Domain / address-literal )`. RFC 5321 §4.1.1.1.
     Ehlo {
-        /// The client's domain or address literal.
-        host: Host,
+        /// The client's name.
+        name: ClientName,
     },
     /// `MAIL FROM:Reverse-path [SP Mail-parameters]`. RFC 5321 §4.1.1.2.
     Mail {
@@ -102,16 +131,24 @@ impl Command {
         let mut c = Cursor::new(args.unwrap_or(""));
         let verb = verb.to_ascii_uppercase();
         let cmd = match (verb.as_str(), args) {
-            ("HELO", Some(_)) => {
-                let domain = parse_domain(&mut c)
-                    .ok()
-                    .filter(|_| c.is_empty())
-                    .ok_or(Error::Syntax("invalid HELO domain"))?;
-                Self::Helo { domain }
+            ("HELO", a) => {
+                let a = a.unwrap_or_default();
+                // RFC 5321 §4.1.1.1: helo = "HELO" SP Domain CRLF
+                let name = match parse_domain(&mut c) {
+                    Ok(domain) if c.is_empty() => ClientName::Valid(Host::Domain(domain)),
+                    _ => ClientName::Invalid(a.to_owned()),
+                };
+                Self::Helo { name }
             }
-            ("EHLO", Some(a)) => Self::Ehlo {
-                host: Host::parse(a).map_err(|_| Error::Syntax("invalid EHLO domain"))?,
-            },
+            // RFC 5321 §4.1.1.1: ehlo = "EHLO" SP ( Domain / address-literal ) CRLF
+            ("EHLO", a) => {
+                let a = a.unwrap_or_default();
+                let name = match Host::parse(a) {
+                    Ok(host) => ClientName::Valid(host),
+                    Err(_) => ClientName::Invalid(a.to_owned()),
+                };
+                Self::Ehlo { name }
+            }
             ("MAIL", Some(_)) => parse_mail(&mut c)?,
             ("RCPT", Some(_)) => parse_rcpt(&mut c)?,
             ("DATA", None) => Self::Data,
@@ -125,7 +162,7 @@ impl Command {
             ("QUIT", None) => Self::Quit,
             ("STARTTLS", None) => Self::StartTls,
             ("AUTH", Some(a)) => parse_auth(a)?,
-            ("HELO" | "EHLO" | "MAIL" | "RCPT" | "BDAT" | "VRFY" | "EXPN" | "AUTH", None) => {
+            ("MAIL" | "RCPT" | "BDAT" | "VRFY" | "EXPN" | "AUTH", None) => {
                 return Err(Error::Syntax("missing argument"));
             }
             ("DATA" | "RSET" | "QUIT" | "STARTTLS", Some(_)) => {
@@ -147,8 +184,8 @@ impl Command {
     pub fn write_to(&self, out: &mut Vec<u8>) {
         // Writes to a Vec cannot fail.
         let _ = match self {
-            Self::Helo { domain } => write!(out, "HELO {domain}"),
-            Self::Ehlo { host } => write!(out, "EHLO {host}"),
+            Self::Helo { name } => write!(out, "HELO {name}"),
+            Self::Ehlo { name } => write!(out, "EHLO {name}"),
             Self::Mail { from, params } => {
                 let _ = write!(out, "MAIL FROM:{from}");
                 params.iter().try_for_each(|p| write!(out, " {p}"))
@@ -195,7 +232,9 @@ fn parse_mail(c: &mut Cursor<'_>) -> Result<Command, Error> {
     if !c.eat_ignore_case("FROM:") {
         return Err(Error::Syntax("expected FROM:"));
     }
-    // RFC 5321 §3.3: "spaces are not permitted on either side of the colon".
+    // RFC 5321 §3.3 forbids spaces on either side of the colon. Policy
+    // (CLAUDE.md): accept spaces after it, since that is harmless.
+    let _ = c.take_while(|ch| ch == ' ');
     let from = parse_reverse_path(c).map_err(|e| match e {
         Error::InvalidAddress(m) => Error::InvalidSender(m),
         e => e,
@@ -213,7 +252,8 @@ fn parse_rcpt(c: &mut Cursor<'_>) -> Result<Command, Error> {
     if !c.eat_ignore_case("TO:") {
         return Err(Error::Syntax("expected TO:"));
     }
-    // RFC 5321 §3.3: no space after the colon.
+    // RFC 5321 §3.3 forbids it, but policy accepts spaces after the colon.
+    let _ = c.take_while(|ch| ch == ' ');
     let to = parse_forward_path(c).map_err(|e| match e {
         Error::InvalidAddress(m) => Error::InvalidRecipient(m),
         e => e,
@@ -343,30 +383,73 @@ mod tests {
 
     #[test]
     fn helo_ehlo() {
+        let valid = |d: &str| ClientName::Valid(Host::Domain(d.into()));
         assert_eq!(
             parse("HELO mx.example.org"),
             Ok(Command::Helo {
-                domain: "mx.example.org".into()
+                name: valid("mx.example.org")
             })
         );
         assert_eq!(
             parse("ehlo mx.example.org"),
             Ok(Command::Ehlo {
-                host: Host::Domain("mx.example.org".into())
+                name: valid("mx.example.org")
             })
         );
         assert!(matches!(
             parse("EHLO [192.0.2.1]"),
             Ok(Command::Ehlo {
-                host: Host::Ipv4(_)
+                name: ClientName::Valid(Host::Ipv4(_))
             })
         ));
+        assert_eq!(
+            parse("EHLO bücher.example"),
+            Ok(Command::Ehlo {
+                name: valid("bücher.example")
+            })
+        );
+    }
+
+    #[test]
+    fn invalid_client_names_are_accepted_and_flagged() {
+        // Policy (CLAUDE.md): never reject on the HELO/EHLO name.
+        let invalid = |s: &str| ClientName::Invalid(s.into());
         // RFC 5321 §4.1.1.1: HELO takes a Domain only, never a literal.
-        assert!(parse("HELO [192.0.2.1]").is_err());
-        assert_eq!(parse("EHLO"), Err(Error::Syntax("missing argument")));
-        assert!(parse("EHLO ").is_err());
-        assert!(parse("EHLO a b").is_err());
-        assert!(parse("EHLO under_score.example").is_err());
+        assert_eq!(
+            parse("HELO [192.0.2.1]"),
+            Ok(Command::Helo {
+                name: invalid("[192.0.2.1]")
+            })
+        );
+        assert_eq!(parse("EHLO"), Ok(Command::Ehlo { name: invalid("") }));
+        assert_eq!(parse("HELO"), Ok(Command::Helo { name: invalid("") }));
+        assert_eq!(
+            parse("EHLO a b"),
+            Ok(Command::Ehlo {
+                name: invalid("a b")
+            })
+        );
+        assert_eq!(
+            parse("EHLO under_score.example"),
+            Ok(Command::Ehlo {
+                name: invalid("under_score.example")
+            })
+        );
+        assert_eq!(
+            parse("EHLO 192.0.2.1"),
+            Ok(Command::Ehlo { name: valid_ip() })
+        );
+        let Ok(Command::Ehlo { name }) = parse("EHLO -bad-") else {
+            panic!()
+        };
+        assert!(!name.is_valid());
+        // Round trip keeps the raw text.
+        assert_eq!(parse("EHLO a b").unwrap().to_bytes(), b"EHLO a b\r\n");
+    }
+
+    /// "192.0.2.1" without brackets is a syntactically valid Domain.
+    fn valid_ip() -> ClientName {
+        ClientName::Valid(Host::Domain("192.0.2.1".into()))
     }
 
     #[test]
@@ -395,9 +478,19 @@ mod tests {
     }
 
     #[test]
-    fn mail_from_strictness() {
-        // RFC 5321 §3.3: no spaces on either side of the colon.
-        assert!(parse("MAIL FROM: <a@b>").is_err());
+    fn mail_from_spacing() {
+        let expected = Ok(Command::Mail {
+            from: ReversePath::Mailbox(mailbox("a@b")),
+            params: vec![],
+        });
+        // RFC 5321 §3.3 forbids a space after the colon; policy accepts it.
+        assert_eq!(parse("MAIL FROM: <a@b>"), expected);
+        assert_eq!(parse("MAIL FROM:  <a@b>"), expected);
+        assert_eq!(
+            parse("MAIL FROM: <a@b>").unwrap().to_bytes(),
+            b"MAIL FROM:<a@b>\r\n"
+        );
+        // Still rejected: space before the colon or between the words.
         assert!(parse("MAIL FROM :<a@b>").is_err());
         assert!(parse("MAIL  FROM:<a@b>").is_err());
         // Bare address without angle brackets.
@@ -408,6 +501,16 @@ mod tests {
         assert!(parse("MAIL FROM:<a@b> ").is_err(), "trailing space");
         assert!(parse("MAIL FROM:<a@b>SIZE=1").is_err());
         assert!(parse("MAIL TO:<a@b>").is_err());
+    }
+
+    #[test]
+    fn long_local_part_and_path_accepted() {
+        // Policy: the RFC 5321 §4.5.3.1.1 and §4.5.3.1.3 limits (64, 256)
+        // are not enforced; the command-line cap bounds the size instead.
+        let local = "a".repeat(300);
+        let line = format!("RCPT TO:<{local}@example.org>");
+        assert!(line.len() > crate::limits::PATH);
+        assert!(parse(&line).is_ok());
     }
 
     #[test]
@@ -430,7 +533,10 @@ mod tests {
             parse("RCPT TO:<>"),
             Err(Error::InvalidRecipient(_))
         ));
-        assert!(parse("RCPT TO: <a@b>").is_err());
+        assert!(
+            parse("RCPT TO: <a@b>").is_ok(),
+            "space after colon accepted"
+        );
     }
 
     #[test]
