@@ -1,0 +1,5 @@
+Authentication-Results: (c (n)) "mx.example.org"; dkim=pass
+Authentication-Results: other; none
+Subject: x
+
+body

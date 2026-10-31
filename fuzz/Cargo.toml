@@ -75,3 +75,17 @@ path = "fuzz_targets/spf_record.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "dmarc_record"
+path = "fuzz_targets/dmarc_record.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "auth_results"
+path = "fuzz_targets/auth_results.rs"
+test = false
+doc = false
+bench = false

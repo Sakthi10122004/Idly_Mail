@@ -1,0 +1,1 @@
+v=DMARC1; p=reject; sp=quarantine; np=none; adkim=s; aspf=r; t=y; psd=n; rua=mailto:d@example.com; fo=0:d

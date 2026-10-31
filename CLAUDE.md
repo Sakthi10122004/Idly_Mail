@@ -112,6 +112,12 @@ Principle: **lenient on harmless syntax, strict on framing.**
   Maintainer rule if a PSL is ever needed: allow MPL-2.0 only as a
   per-crate cargo-deny exception for the one crate carrying the unmodified
   list, embedded at build time (no runtime downloads), and record it here.
+- DMARC with several From domains (RFC 9989 §11.5): evaluate each
+  distinct domain (at most 3) and apply the strictest failing policy; more
+  domains, or zero/several From fields, give `permerror`, never "none".
+- DKIM: a signature with `l=` that covers only part of the body is
+  reported as `policy`, never `pass` (RFC 6376 §8.2: content can be
+  appended).
 - Phase 1 delivers local inbound mail to Maildir; Phase 2 imports it.
 - `idly serve --demo` (milestone 3.5) must stay receive-only and
   127.0.0.1-only: `Config::validate_demo` refuses any other bind address,

@@ -37,11 +37,29 @@ grouped by development phase (see the roadmap in [README.md](README.md)).
   - The null sender is checked as `postmaster@<HELO name>`.
   - Checked against the RFC's official §7.4 macro examples and
     Appendix A example zones.
+- **DMARC** (RFC 9989, which replaces RFC 7489):
+  - Policy discovery and Organizational Domains use the DNS Tree Walk, with
+    no Public Suffix List. A walk makes at most 8 DNS queries.
+  - Relaxed and strict SPF and DKIM alignment; `p`, `sp` and `np` (for
+    domains that don't exist); `t=y` testing mode lowers the policy by one
+    level.
+  - Records with a missing or invalid policy fall back as RFC 9989
+    §4.10.1 says (to `p=none` if `rua` is valid, otherwise DMARC is not
+    applied).
+  - DNS errors give `temperror`, and no policy is applied.
+  - Checked against RFC 9989's worked examples: the 13-label tree walk,
+    the three Organizational Domain examples, and the Appendix B.1
+    alignment examples.
+- **Authentication-Results** header field (RFC 8601):
+  - Built from the SPF, DKIM and DMARC results, with values quoted where
+    needed.
+  - Fields that claim to come from our own server are removed from
+    incoming mail (RFC 8601 §5), so a sender can't forge a "pass".
 - **Message parsing** for authentication: header fields kept exactly as
   received, and the domains of the From field (with display names,
   comments, quoted strings and groups).
-- **Fuzz targets** `message_parse`, `dkim_verify` and `spf_record`, also
-  run in CI.
+- **Fuzz targets** `message_parse`, `dkim_verify`, `spf_record`,
+  `dmarc_record` and `auth_results`, also run in CI.
 - **Local demo:** `idly serve --demo` receives mail and writes it to
   Maildir.
   - It only listens on 127.0.0.1 and refuses to start with any other
@@ -107,6 +125,11 @@ grouped by development phase (see the roadmap in [README.md](README.md)).
   `clippy.toml` forbids the `rsa` crate's signing and decryption functions.
   The advisory is ignored in `deny.toml` and `.cargo/audit.toml` with this
   reason.
+- **Several From addresses can't be used to dodge DMARC** (RFC 9989
+  §11.5). Each distinct domain in the From field is checked, up to 3, and
+  the strictest failing policy applies. A message with more domains, or
+  with no or several From fields, gets `permerror` instead of slipping
+  through as "no DMARC".
 - **Fixed an infinite loop in From-address parsing** found by fuzzing. A
   stray `]` in an address field made the parser loop until it ran out of
   memory. It was not yet reachable from the network; a regression test
