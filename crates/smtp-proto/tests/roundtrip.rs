@@ -141,7 +141,7 @@ fn reply() -> impl Strategy<Value = Reply> {
         .prop_flat_map(|(a, b, c)| {
             let code = a * 100 + b * 10 + c;
             let class = u8::try_from(a).unwrap_or(5);
-            // Class 3 has no enhanced codes (RFC 3463 §3.1).
+            // RFC 3463 §2: enhanced code classes are 2, 4 and 5 only.
             let enhanced = if class == 3 {
                 Just(None).boxed()
             } else {

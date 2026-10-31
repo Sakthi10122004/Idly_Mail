@@ -34,14 +34,14 @@ pub enum Capability {
     EnhancedStatusCodes,
     /// `PIPELINING`. RFC 2920 §3.
     Pipelining,
-    /// `REQUIRETLS`. RFC 8689 §3.
+    /// `REQUIRETLS`. RFC 8689 §2.
     RequireTls,
     /// `SIZE [n]`, the maximum message size; 0 or absent means no fixed
     /// limit is announced. RFC 1870 §4.
     Size(Option<u64>),
     /// `SMTPUTF8`. RFC 6531 §3.2.
     SmtpUtf8,
-    /// `STARTTLS`. RFC 3207 §4.
+    /// `STARTTLS`. RFC 3207 §2.
     StartTls,
     /// Any other keyword, with its parameters, as sent.
     Other {

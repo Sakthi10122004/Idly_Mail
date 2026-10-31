@@ -75,7 +75,7 @@ impl Error {
     /// from RFC 3463 §3.2 (addressing) and §3.6 (protocol).
     pub fn reply_code(&self) -> Option<(u16, EnhancedCode)> {
         let r = match self {
-            // RFC 5321 §4.5.3.1.10: "500 Line too long."
+            // RFC 5321 §4.5.3.1.9: "500 Line too long."
             Self::BareCr | Self::BareLf | Self::LineTooLong { .. } | Self::InvalidUtf8 => {
                 (500, EnhancedCode::new(5, 5, 2))
             }

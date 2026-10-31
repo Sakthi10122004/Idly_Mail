@@ -171,7 +171,7 @@ fn strip_enhanced(code: u16, lines: &mut [String]) -> Option<EnhancedCode> {
     for line in lines.iter() {
         let token = line.split(' ').next().unwrap_or_default();
         let e = parse_enhanced(token)?;
-        // RFC 3463 §3.1: the class must agree with the reply code.
+        // The class (RFC 3463 §2) must agree with the reply code's first digit.
         if u16::from(e.class) != code / 100 || found.is_some_and(|f| f != e) {
             return None;
         }
@@ -301,7 +301,7 @@ mod tests {
 
     #[test]
     fn enhanced_code_not_stripped_when_inconsistent() {
-        // Class mismatch (RFC 3463 §3.1).
+        // Class mismatch with the reply code.
         let r = reply("250 5.0.0 odd\r\n");
         assert_eq!((r.enhanced, r.lines[0].as_str()), (None, "5.0.0 odd"));
         // Only some lines carry it.
