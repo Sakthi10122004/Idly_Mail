@@ -118,6 +118,14 @@ Principle: **lenient on harmless syntax, strict on framing.**
 - DKIM: a signature with `l=` that covers only part of the body is
   reported as `policy`, never `pass` (RFC 6376 §8.2: content can be
   appended).
+- Queue durability: spool file (fsync, rename, fsync dir) BEFORE the
+  database commit, and 250 only after both. Recovery deletes spool files
+  without a row (never acknowledged) and fails rows without a spool file.
+  Delivery is at-least-once (RFC 5321 §6.1). Bounces use the null sender
+  and are never sent to null-sender mail or to our own MAILER-DAEMON.
+  Queue tests use a fake connector: no network, no DNS.
+- Disk guard: below `limits.min_free_space` (default 1 GiB) new mail gets
+  `452 4.3.1`.
 - Phase 1 delivers local inbound mail to Maildir; Phase 2 imports it.
 - `idly serve --demo` (milestone 3.5) must stay receive-only and
   127.0.0.1-only: `Config::validate_demo` refuses any other bind address,

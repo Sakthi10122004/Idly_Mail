@@ -14,7 +14,9 @@ use smtp_proto::{
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::time::timeout;
 
-use crate::{Directory, Envelope, Observer, Recipient, Server, Signals, Sink, date};
+use smtp_proto::date;
+
+use crate::{Directory, Envelope, Observer, Recipient, Server, Signals, Sink};
 
 /// Too many bad commands in one session: the client is not speaking SMTP.
 const MAX_ERRORS: u32 = 20;
@@ -281,6 +283,9 @@ where
             // RFC 5321 §4.1.4: MAIL must not be sent inside a transaction.
             return self.reply(503, (5, 5, 1), "Nested MAIL command");
         }
+        if !self.server.sink.has_space() {
+            return self.no_space();
+        }
         let mut smtputf8 = false;
         for p in params {
             match p {
@@ -314,6 +319,13 @@ where
             recipients: Vec::new(),
         });
         self.reply(250, (2, 1, 0), "Sender OK");
+    }
+
+    /// RFC 5321 §4.2.2: 452 for insufficient system storage; RFC 3463
+    /// §3.4 X.3.1 mail system full. Temporary, so the client retries.
+    fn no_space(&mut self) {
+        tracing::warn!(client_ip = %self.client_ip, "refusing mail: free disk space below the floor");
+        self.reply(452, (4, 3, 1), "Insufficient system storage");
     }
 
     fn rcpt(&mut self, to: &ForwardPath) {
@@ -439,6 +451,10 @@ where
             smtputf8: tx.smtputf8,
             signals: self.signals,
         };
+        if !self.server.sink.has_space() {
+            self.no_space();
+            return Ok(Next::Continue);
+        }
         let mut stored = received_header(&envelope, &self.cfg().hostname, self.esmtp).into_bytes();
         stored.extend_from_slice(&message);
         match self.server.sink.deliver(&envelope, &stored).await {

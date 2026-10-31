@@ -12,6 +12,30 @@ grouped by development phase (see the roadmap in [README.md](README.md)).
 ### Phase 1 — Send and receive (in progress)
 
 #### Added
+- **Persistent outbound queue** (`queue` crate):
+  - Each message is a spool file plus SQLite rows. The spool file is
+    written and fsynced before the database commit, and a 250 reply only
+    follows both, so an accepted message survives `kill -9` and a
+    restart.
+  - Recovery on startup cleans up after a crash at any point. Tests
+    simulate crashes on both sides of the commit, and in the middle of a
+    delivery: no accepted message is lost or delivered twice.
+  - Retries after 5, 10, 20, 40 and 80 minutes, then every 4 hours. After
+    5 days the message bounces with status 5.4.7.
+  - Bounces are RFC 3464 delivery status notifications (multipart/report,
+    RFC 6522) that include the original headers. A bounce is never sent
+    for null-sender mail or to our own MAILER-DAEMON, so bounce loops are
+    impossible.
+  - Test mode holds mail for domains outside the allow-list. It is
+    checked when the message is queued and again just before delivery,
+    and held mail is never sent and never bounced.
+  - A per-domain concurrency limit, delivery leases (also ready for
+    clustering later), and list/retry/drop operations for the coming
+    `idly queue` command.
+- **Disk-space guard:** when free space falls below
+  `limits.min_free_space` (default 1 GiB), new mail gets
+  `452 4.3.1 Insufficient system storage` instead of being accepted. The
+  client retries later.
 - **DKIM** (`mail-auth-glue` crate, RFC 6376 and RFC 8463):
   - Signing with RSA-SHA256 and Ed25519-SHA256, relaxed/relaxed
     canonicalization. Header fields are "oversigned", so none can be added

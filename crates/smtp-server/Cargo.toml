@@ -12,6 +12,7 @@ publish.workspace = true
 # server can only hand messages to a local Sink. See CLAUDE.md (no relays).
 [dependencies]
 smtp-proto.workspace = true
+queue.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 

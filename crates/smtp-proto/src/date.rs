@@ -9,7 +9,7 @@ const MONTHS: [&str; 12] = [
 
 /// Formats `t` in UTC, e.g. `Sat, 31 Oct 2026 13:53:06 +0000`.
 /// RFC 5322 §3.3: `date-time = [ day-of-week "," ] date time [CFWS]`.
-pub(crate) fn rfc5322(t: SystemTime) -> String {
+pub fn rfc5322(t: SystemTime) -> String {
     let secs = t.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
     let days = secs / 86_400;
     let rem = secs % 86_400;

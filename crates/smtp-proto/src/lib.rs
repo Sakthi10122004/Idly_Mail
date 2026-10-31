@@ -13,6 +13,7 @@ pub mod address;
 pub mod command;
 mod cursor;
 pub mod data;
+pub mod date;
 pub mod ehlo;
 pub mod error;
 pub mod limits;

@@ -156,7 +156,10 @@ async fn start_demo(
     let server = Server::new(
         inbound,
         directory::ConfigDirectory::new(config),
-        Maildir::new(maildir_root, &config.server.hostname),
+        Maildir::new(maildir_root, &config.server.hostname).with_min_free_space(
+            config.limits.min_free_space,
+            std::sync::Arc::new(queue::space::Statvfs),
+        ),
         metrics::MetricsObserver(metrics),
     );
     for &addr in &config.listen.smtp {

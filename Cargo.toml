@@ -15,6 +15,9 @@ smtp-proto = { path = "crates/smtp-proto" }
 dns = { path = "crates/dns" }
 smtp-server = { path = "crates/smtp-server" }
 mail-auth-glue = { path = "crates/mail-auth-glue" }
+queue = { path = "crates/queue" }
+rusqlite = { version = "0.41", default-features = false, features = ["bundled", "fallible_uint"] }
+rustix = { version = "1", default-features = false, features = ["std", "fs"] }
 ring = { version = "0.17", default-features = false, features = ["std"] }
 base64 = { version = "0.23", default-features = false, features = ["std"] }
 rsa = { version = "0.9", default-features = false, features = ["std", "pem"] }

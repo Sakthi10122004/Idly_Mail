@@ -71,6 +71,10 @@ impl Sink for RecordingSink {
         self.envelopes.lock().unwrap().push(envelope.clone());
         Ok(())
     }
+
+    fn has_space(&self) -> bool {
+        self.maildir.has_space()
+    }
 }
 
 struct Harness {
@@ -94,12 +98,18 @@ fn config() -> InboundConfig {
 }
 
 async fn start(config: InboundConfig) -> Harness {
+    start_with_floor(config, 0).await
+}
+
+/// Like `start`, with a free-space floor on the Maildir.
+async fn start_with_floor(config: InboundConfig, min_free: u64) -> Harness {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("maildir");
     let counts = Arc::new(Counts::default());
     let envelopes = Arc::new(Mutex::new(Vec::new()));
     let sink = RecordingSink {
-        maildir: Maildir::new(&root, "mx.example.org"),
+        maildir: Maildir::new(&root, "mx.example.org")
+            .with_min_free_space(min_free, Arc::new(queue::space::Statvfs)),
         envelopes: envelopes.clone(),
     };
     let server = Server::new(config, TestDirectory, sink, TestObserver(counts.clone()));
@@ -483,4 +493,21 @@ async fn connection_limit() {
     let (mut second, g) = Client::connect(h.addr).await;
     assert_eq!(g.code, 421);
     assert!(second.is_closed().await);
+}
+
+#[tokio::test]
+async fn refuses_new_mail_when_disk_is_low() {
+    // A floor no disk can meet: every new message gets 452 4.3.1.
+    let h = start_with_floor(config(), u64::MAX).await;
+    let (mut c, _) = Client::connect(h.addr).await;
+    c.cmd("EHLO client.example.net").await;
+    let r = c.cmd("MAIL FROM:<sender@example.net>").await;
+    assert_eq!(
+        (r.code, r.enhanced.map(|e| e.to_string())),
+        (452, Some("4.3.1".into()))
+    );
+    assert_eq!(r.lines[0], "Insufficient system storage");
+    // The session continues, and nothing is stored.
+    assert_eq!(c.cmd("NOOP").await.code, 250);
+    assert_eq!(all_messages(&h.root), 0);
 }

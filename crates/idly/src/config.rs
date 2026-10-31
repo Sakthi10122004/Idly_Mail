@@ -103,6 +103,10 @@ pub(crate) struct Limits {
     /// Maximum RCPT commands per transaction.
     #[serde(default = "default_max_recipients")]
     pub(crate) max_recipients: usize,
+    /// Refuse new mail (452 4.3.1) when the data directory's filesystem
+    /// has fewer free bytes than this.
+    #[serde(default = "default_min_free_space")]
+    pub(crate) min_free_space: u64,
 }
 
 impl Default for Limits {
@@ -112,6 +116,7 @@ impl Default for Limits {
             inbound_line: default_inbound_line(),
             message_size: default_message_size(),
             max_recipients: default_max_recipients(),
+            min_free_space: default_min_free_space(),
         }
     }
 }
@@ -127,6 +132,9 @@ fn default_message_size() -> u64 {
 }
 fn default_max_recipients() -> usize {
     100
+}
+fn default_min_free_space() -> u64 {
+    1024 * 1024 * 1024
 }
 
 /// A domain this server receives and sends mail for.

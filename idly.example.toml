@@ -25,6 +25,7 @@ command_line = 4096         # octets, CRLF included (RFC minimum: 512)
 inbound_line = 65536        # octets per DATA line (RFC minimum: 1000)
 message_size = 26214400     # 25 MiB, announced with SIZE
 max_recipients = 100        # per message (RFC minimum: 100)
+min_free_space = 1073741824 # refuse new mail (452 4.3.1) below 1 GiB free
 
 # Domains this server handles. Repeat the block for each domain.
 [[domain]]

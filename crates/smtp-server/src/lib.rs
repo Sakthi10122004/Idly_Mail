@@ -20,7 +20,6 @@ use smtp_proto::{ClientName, ForwardPath, ReversePath};
 use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 
-mod date;
 pub mod maildir;
 mod session;
 
@@ -101,6 +100,12 @@ pub trait Sink: Send + Sync + 'static {
         envelope: &Envelope,
         message: &[u8],
     ) -> impl Future<Output = std::io::Result<()>> + Send;
+
+    /// Whether there is room for new mail. When false, new mail gets
+    /// "452 4.3.1 Insufficient system storage" instead of being accepted.
+    fn has_space(&self) -> bool {
+        true
+    }
 }
 
 /// Hooks for metrics.

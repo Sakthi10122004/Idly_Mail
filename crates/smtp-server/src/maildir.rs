@@ -3,19 +3,32 @@
 //! delivery protocol). Phase 2 imports these into the mail store.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::io::AsyncWriteExt;
 
+use queue::space::{self, SpaceProbe, Statvfs};
+
 use crate::{Envelope, Sink};
 
 /// Delivers into `<root>/<account>/{tmp,new,cur}`.
-#[derive(Debug)]
 pub struct Maildir {
     root: PathBuf,
     hostname: String,
     counter: AtomicU64,
+    min_free: u64,
+    probe: Arc<dyn SpaceProbe>,
+}
+
+impl std::fmt::Debug for Maildir {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Maildir")
+            .field("root", &self.root)
+            .field("min_free", &self.min_free)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Maildir {
@@ -27,7 +40,17 @@ impl Maildir {
             root: root.into(),
             hostname,
             counter: AtomicU64::new(0),
+            min_free: 0,
+            probe: Arc::new(Statvfs),
         }
+    }
+
+    /// Refuse new mail when the filesystem has less than `min_free` bytes
+    /// free, as measured by `probe`.
+    pub fn with_min_free_space(mut self, min_free: u64, probe: Arc<dyn SpaceProbe>) -> Self {
+        self.min_free = min_free;
+        self.probe = probe;
+        self
     }
 
     /// The Maildir directory of an account.
@@ -101,6 +124,18 @@ pub fn safe_dir_name(account: &str) -> String {
 }
 
 impl Sink for Maildir {
+    fn has_space(&self) -> bool {
+        // The root may not exist yet; measure its nearest existing ancestor.
+        let mut path = self.root.as_path();
+        while !path.exists() {
+            match path.parent() {
+                Some(p) => path = p,
+                None => break,
+            }
+        }
+        self.min_free == 0 || space::enough(self.probe.as_ref(), path, self.min_free)
+    }
+
     async fn deliver(&self, envelope: &Envelope, message: &[u8]) -> std::io::Result<()> {
         // RFC 5321 §4.4: the delivery server adds Return-Path at final delivery.
         let mut done = Vec::new();
