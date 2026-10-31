@@ -1,0 +1,36 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.99"
+license = "Apache-2.0 OR MIT"
+authors = ["The Idly Mail Contributors"]
+publish = false
+
+[workspace.dependencies]
+smtp-proto = { path = "crates/smtp-proto" }
+clap = { version = "4", default-features = false, features = ["std", "help", "usage", "error-context", "derive"] }
+proptest = { version = "1", default-features = false, features = ["std"] }
+
+[workspace.lints.rust]
+# Hard constraint 4: no unsafe code anywhere in our crates.
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+# Parsers of network input must not panic on hostile bytes.
+indexing_slicing = "warn"
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+arithmetic_side_effects = "warn"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
