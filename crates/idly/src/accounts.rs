@@ -66,6 +66,15 @@ impl smtp_server::Accounts for ConfigAccounts {
         account.filter(|_| ok).cloned()
     }
 
+    fn account_name(&self, username: &str) -> Option<String> {
+        Mailbox::parse(username)
+            .ok()
+            .as_ref()
+            .and_then(key)
+            .and_then(|k| self.accounts.get(&k))
+            .map(|(account, _)| account.clone())
+    }
+
     fn may_send_as(&self, account: &str, address: &str) -> bool {
         // An account sends only as its own address (aliases come later).
         Mailbox::parse(address)

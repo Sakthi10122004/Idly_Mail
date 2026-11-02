@@ -59,6 +59,11 @@ impl Accounts for Users {
     fn may_send_as(&self, account: &str, address: &str) -> bool {
         account.eq_ignore_ascii_case(address)
     }
+    fn account_name(&self, username: &str) -> Option<String> {
+        username
+            .eq_ignore_ascii_case("user@example.org")
+            .then(|| "user@example.org".to_owned())
+    }
 }
 
 /// Discards mail after checking the invariants.

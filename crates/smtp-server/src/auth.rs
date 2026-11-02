@@ -17,6 +17,9 @@ pub trait Accounts: Send + Sync + 'static {
     /// Implementations must take about the same time whether or not the
     /// account exists (e.g. by verifying against a dummy hash).
     fn verify(&self, username: &str, password: &str) -> Option<String>;
+    /// The canonical account name if `username` names an existing account.
+    /// Cheap (no password check); used only to decide what to log.
+    fn account_name(&self, username: &str) -> Option<String>;
     /// Whether `account` may use `address` (MAIL FROM and the From header).
     fn may_send_as(&self, account: &str, address: &str) -> bool;
 }
@@ -63,6 +66,21 @@ struct Failures {
 /// Bounded so an attacker can't grow the tables without limit.
 const MAX_TRACKED: usize = 50_000;
 
+/// The unit that IP limits count: an IPv4 address, or an IPv6 /64 (one
+/// customer usually holds a whole /64, so per-address counting is trivial
+/// to evade). IPv4-mapped IPv6 counts as the IPv4 address.
+pub(crate) fn client_key(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V4(_) => ip,
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => IpAddr::V4(v4),
+            None => IpAddr::V6(std::net::Ipv6Addr::from_bits(
+                v6.to_bits() & !u128::from(u64::MAX),
+            )),
+        },
+    }
+}
+
 /// Shared failure counters and the verification gate.
 #[derive(Debug)]
 pub(crate) struct Guard {
@@ -92,7 +110,7 @@ impl Guard {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        self.current(state.0.get(&ip)) >= self.limits.ip_lockout_failures
+        self.current(state.0.get(&client_key(ip))) >= self.limits.ip_lockout_failures
     }
 
     /// Records a failure and returns how long to wait before replying:
@@ -118,7 +136,7 @@ impl Guard {
             f.last = now;
             f.count
         };
-        let by_ip = bump(state.0.entry(ip).or_insert(Failures {
+        let by_ip = bump(state.0.entry(client_key(ip)).or_insert(Failures {
             count: 0,
             last: now,
         }));
@@ -146,13 +164,14 @@ impl Guard {
             .min(self.limits.max_delay)
     }
 
-    /// A success clears the IP's and the account's counters.
-    pub(crate) fn success(&self, ip: IpAddr, account: &str) {
+    /// A success clears the account's counter. The IP's counter stays, so
+    /// an attacker with one valid account can't log in to reset it between
+    /// guesses at other accounts.
+    pub(crate) fn success(&self, account: &str) {
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.0.remove(&ip);
         state.1.remove(&account.to_ascii_lowercase());
     }
 }
@@ -211,6 +230,53 @@ mod tests {
     }
 
     #[test]
+    fn ipv6_counts_per_64() {
+        let limits = AuthLimits {
+            ip_lockout_failures: 5,
+            ..AuthLimits::default()
+        };
+        let g = Guard::new(limits);
+        // Rotating through addresses of one /64 doesn't escape the limit.
+        for i in 1..=5u16 {
+            let ip: IpAddr = format!("2001:db8:1:2::{i:x}").parse().unwrap();
+            assert!(!g.ip_locked(ip), "attempt {i}");
+            g.failure(ip, &format!("user{i}"));
+        }
+        assert!(g.ip_locked("2001:db8:1:2:ffff:ffff:ffff:ffff".parse().unwrap()));
+        // The neighbouring /64 is a different client.
+        assert!(!g.ip_locked("2001:db8:1:3::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn ipv4_counts_per_address() {
+        let g = Guard::new(AuthLimits {
+            ip_lockout_failures: 2,
+            ..AuthLimits::default()
+        });
+        g.failure("192.0.2.1".parse().unwrap(), "a");
+        g.failure("192.0.2.1".parse().unwrap(), "b");
+        assert!(g.ip_locked("192.0.2.1".parse().unwrap()));
+        assert!(
+            g.ip_locked("::ffff:192.0.2.1".parse().unwrap()),
+            "mapped form"
+        );
+        assert!(!g.ip_locked("192.0.2.2".parse().unwrap()));
+    }
+
+    #[test]
+    fn success_does_not_reset_the_ip() {
+        let g = Guard::new(AuthLimits {
+            ip_lockout_failures: 2,
+            ..AuthLimits::default()
+        });
+        let ip = "192.0.2.1".parse().unwrap();
+        g.failure(ip, "victim");
+        g.success("attacker");
+        g.failure(ip, "victim");
+        assert!(g.ip_locked(ip));
+    }
+
+    #[test]
     fn base64_responses() {
         assert_eq!(decode("="), Ok(vec![]));
         assert_eq!(decode("YWxpY2U="), Ok(b"alice".to_vec()));
@@ -240,8 +306,13 @@ mod tests {
         let other: IpAddr = "192.0.2.2".parse().unwrap();
         assert!(g.failure(other, "ALICE@example.org") > Duration::ZERO);
         assert!(!g.ip_locked(other));
-        g.success(ip, "alice@example.org");
-        assert!(!g.ip_locked(ip));
+        // Success clears the account's delay, not the IP's lockout.
+        g.success("alice@example.org");
+        assert!(g.ip_locked(ip));
+        assert_eq!(
+            g.failure("192.0.2.9".parse().unwrap(), "alice@example.org"),
+            Duration::ZERO
+        );
     }
 
     #[test]

@@ -1,0 +1,13 @@
+EHLO a
+STARTTLS
+EHLO a
+AUTH LOGIN
+dXNlckBleGFtcGxlLm9yZw==
+cHc=
+MAIL FROM:<user@example.org>
+RCPT TO:<x@remote.example>
+DATA
+From: user@example.org
+
+x
+.

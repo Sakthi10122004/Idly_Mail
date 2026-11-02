@@ -15,7 +15,7 @@ mod tests_rfc8463;
 pub use canon::Canon;
 pub use sign::{DEFAULT_HEADERS, SignError, Signer, SigningKey};
 pub use signature::{Algorithm, Signature, SignatureError};
-pub use verify::{DkimResult, Verification, verify};
+pub use verify::{DkimResult, KEY_TIMEOUT, Verification, verify};
 
 use crate::message::Message;
 

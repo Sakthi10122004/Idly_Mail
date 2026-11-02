@@ -154,6 +154,14 @@ first, before any decision below.
 5. **Authenticated submissions skip inbound DMARC rejection**: mail from a
    logged-in account is checked by sender authorization (MAIL FROM and
    From must be the account's), not by SPF/DKIM/DMARC.
+6. **Attacker-controlled DNS never makes DMARC temperror**
+   (maintainer decision, milestone 6 review). Every lookup whose domain
+   the sender chooses has its own timeout: the SPF chain (RFC 7208 limit),
+   each DKIM key, and the Tree Walk for each SPF/DKIM identifier. A
+   timeout or error there only means that identifier didn't pass. DMARC is
+   `temperror` ONLY when the Author Domain's own policy discovery fails.
+   The sum of these budgets stays below the overall check timeout, so the
+   fail-open in rule 1 can't be reached through slow attacker DNS.
 
 ## RFC citations
 

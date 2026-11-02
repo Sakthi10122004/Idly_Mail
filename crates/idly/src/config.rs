@@ -119,9 +119,13 @@ pub(crate) struct Limits {
     /// Seconds a whole SMTP session may last.
     #[serde(default = "default_session_timeout")]
     pub(crate) session_timeout: u64,
-    /// Simultaneous SMTP connections over all listeners.
+    /// Simultaneous inbound connections (port 25).
     #[serde(default = "default_max_connections")]
     pub(crate) max_connections: usize,
+    /// Simultaneous submission connections (587 and 465), a separate pool
+    /// so a flood on port 25 can't lock users out.
+    #[serde(default = "default_max_submission_connections")]
+    pub(crate) max_submission_connections: usize,
 }
 
 impl Default for Limits {
@@ -137,6 +141,7 @@ impl Default for Limits {
             tls_handshake_timeout: default_tls_handshake_timeout(),
             session_timeout: default_session_timeout(),
             max_connections: default_max_connections(),
+            max_submission_connections: default_max_submission_connections(),
         }
     }
 }
@@ -171,6 +176,9 @@ fn default_session_timeout() -> u64 {
 fn default_max_connections() -> usize {
     100
 }
+fn default_max_submission_connections() -> usize {
+    50
+}
 
 /// The TLS certificate for STARTTLS and port 465 (until ACME, milestone 8).
 #[derive(Debug, Clone, Deserialize)]
@@ -187,6 +195,11 @@ pub(crate) struct Tls {
 #[serde(deny_unknown_fields)]
 pub(crate) struct Domain {
     pub(crate) name: String,
+    /// Start even though this domain has no DKIM key, sending its mail
+    /// unsigned. Off by default: unsigned mail fails DMARC at most
+    /// receivers, so a missing key is normally a startup error.
+    #[serde(default)]
+    pub(crate) allow_unsigned: bool,
 }
 
 /// A mail account that can authenticate for submission.
@@ -427,6 +440,12 @@ impl Config {
         }
         if l.max_connections == 0 {
             bad("limits.max_connections".into(), "must be at least 1");
+        }
+        if l.max_submission_connections == 0 {
+            bad(
+                "limits.max_submission_connections".into(),
+                "must be at least 1",
+            );
         }
 
         if let Some(tls) = &self.tls {

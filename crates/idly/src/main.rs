@@ -80,13 +80,24 @@ enum DkimCommand {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
-        Command::CheckConfig => match Config::load(&cli.config) {
-            Ok(_) => {
-                println!("{}: OK", cli.config.display());
-                ExitCode::SUCCESS
+        Command::CheckConfig => {
+            let config = match Config::load(&cli.config) {
+                Ok(c) => c,
+                Err(e) => return fail(&e),
+            };
+            match dkim::load(&config) {
+                Ok(loaded) => {
+                    for d in &loaded.unsigned {
+                        eprintln!(
+                            "warning: {d} has no DKIM key; allow_unsigned is set, so its mail will be sent unsigned"
+                        );
+                    }
+                    println!("{}: OK", cli.config.display());
+                    ExitCode::SUCCESS
+                }
+                Err(e) => fail(&e),
             }
-            Err(e) => fail(&e),
-        },
+        }
         Command::User {
             command: UserCommand::HashPassword,
         } => hash_password(),
@@ -228,6 +239,7 @@ fn listener_config(config: &Config, inbound_checks: bool) -> smtp_server::Inboun
     c.tls_handshake_timeout = Duration::from_secs(l.tls_handshake_timeout);
     c.session_timeout = Duration::from_secs(l.session_timeout);
     c.max_connections = l.max_connections;
+    c.max_submission_connections = l.max_submission_connections;
     c.inbound_checks = inbound_checks;
     c
 }
@@ -310,6 +322,10 @@ async fn start(config: &Config, metrics: Arc<metrics::Metrics>) -> std::io::Resu
     let resolver = dns::Recursive::new().map_err(|e| other("DNS resolver", &e))?;
     let accounts = accounts::ConfigAccounts::new(config).map_err(|e| other("accounts", &e))?;
     let dkim = dkim::load(config).map_err(|e| other("DKIM", &e))?;
+    for d in &dkim.unsigned {
+        tracing::warn!(domain = %d, "no DKIM key and allow_unsigned is set: this domain's mail is sent unsigned and will fail DMARC at most receivers");
+    }
+    let dkim = dkim.keys;
 
     let test_mode_allow = config.test_mode.enabled.then(|| {
         config

@@ -93,16 +93,30 @@ pub(crate) fn generate(
     Ok(out)
 }
 
-/// Loads every key of every configured domain. A domain without keys is
-/// only warned about: its mail goes out unsigned.
-pub(crate) fn load(config: &Config) -> Result<DkimKeys, String> {
+/// The keys found, and the domains that will send unsigned mail because
+/// they have no key and set `allow_unsigned`.
+#[derive(Debug)]
+pub(crate) struct Loaded {
+    pub(crate) keys: DkimKeys,
+    pub(crate) unsigned: Vec<String>,
+}
+
+/// Loads every key of every configured domain. A domain without a key is
+/// an error unless it sets `allow_unsigned = true`.
+pub(crate) fn load(config: &Config) -> Result<Loaded, String> {
     let mut keys = DkimKeys::new();
+    let mut unsigned = Vec::new();
+    let mut missing = Vec::new();
     for d in &config.domains {
         let dir = domain_dir(&config.server.data_dir, &d.name)?;
         let entries = match std::fs::read_dir(&dir) {
             Ok(e) => e,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                tracing::warn!(domain = %d.name, "no DKIM keys; run `idly dkim generate`");
+                if d.allow_unsigned {
+                    unsigned.push(d.name.clone());
+                } else {
+                    missing.push(d.name.clone());
+                }
                 continue;
             }
             Err(e) => return Err(format!("{}: {e}", dir.display())),
@@ -135,10 +149,25 @@ pub(crate) fn load(config: &Config) -> Result<DkimKeys, String> {
             found = true;
         }
         if !found {
-            tracing::warn!(domain = %d.name, "no DKIM keys; run `idly dkim generate`");
+            if d.allow_unsigned {
+                unsigned.push(d.name.clone());
+            } else {
+                missing.push(d.name.clone());
+            }
         }
     }
-    Ok(keys)
+    if !missing.is_empty() {
+        let list: Vec<String> = missing
+            .iter()
+            .map(|d| format!("\n  - {d}: run `idly dkim generate --domain {d} --selector <name>`"))
+            .collect();
+        return Err(format!(
+            "no DKIM key for {} domain(s) (or set allow_unsigned = true on the [[domain]] to send unsigned mail):{}",
+            missing.len(),
+            list.concat()
+        ));
+    }
+    Ok(Loaded { keys, unsigned })
 }
 
 #[cfg(test)]
@@ -174,7 +203,45 @@ mod tests {
         // Never overwrites.
         assert!(generate(tmp.path(), "example.org", "s1", Algorithm::Both).is_err());
         assert!(generate(tmp.path(), "example.org", "../x", Algorithm::Rsa).is_err());
-        let keys = load(&config).unwrap();
-        assert!(keys.has("example.org"));
+        let loaded = load(&config).unwrap();
+        assert!(loaded.keys.has("example.org"));
+        assert!(loaded.unsigned.is_empty());
+    }
+
+    fn config_for(dir: &Path, allow_unsigned: bool) -> Config {
+        let text = format!(
+            r#"
+            [server]
+            hostname = "mx.example.org"
+            data_dir = "{}"
+            [[domain]]
+            name = "example.org"
+            allow_unsigned = {allow_unsigned}
+            [[domain]]
+            name = "signed.example"
+            [[account]]
+            address = "a@example.org"
+            password_hash = "$argon2id$v=19$m=19456,t=2,p=1$ZGVtb2RlbW9kZW1v$ZGVtby1vbmx5LW5vdC1hLXJlYWwtaGFzaA"
+            "#,
+            dir.display()
+        );
+        Config::parse(&text).unwrap()
+    }
+
+    #[test]
+    fn missing_key_is_an_error_unless_allowed() {
+        let tmp = tempfile::tempdir().unwrap();
+        generate(tmp.path(), "signed.example", "s", Algorithm::Ed25519).unwrap();
+        let err = load(&config_for(tmp.path(), false)).unwrap_err();
+        assert!(
+            err.contains("example.org") && !err.contains("signed.example"),
+            "{err}"
+        );
+        let loaded = load(&config_for(tmp.path(), true)).unwrap();
+        assert_eq!(loaded.unsigned, vec!["example.org".to_owned()]);
+        assert!(loaded.keys.has("signed.example"));
+        // An empty key directory counts as missing too.
+        std::fs::create_dir_all(tmp.path().join("dkim/example.org")).unwrap();
+        assert!(load(&config_for(tmp.path(), false)).is_err());
     }
 }

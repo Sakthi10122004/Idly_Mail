@@ -1,5 +1,10 @@
 //! DKIM verification (RFC 6376 §6).
 
+use std::future::Future;
+use std::pin::Pin;
+use std::task::Poll;
+use std::time::Duration;
+
 use dns::Resolver;
 use ring::digest::{SHA256, digest};
 use ring::signature::{ED25519, RSA_PKCS1_1024_8192_SHA256_FOR_LEGACY_USE_ONLY, UnparsedPublicKey};
@@ -12,6 +17,10 @@ use crate::message::Message;
 
 /// The most signatures checked per message; each costs a DNS lookup.
 const MAX_SIGNATURES: usize = 8;
+/// Each key lookup gets this long. The key's domain is chosen by whoever
+/// signed (possibly an attacker), so a slow lookup only fails that one
+/// signature, and lookups run concurrently so one can't starve another.
+pub const KEY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The result of checking one signature, named as in RFC 8601 §2.7.1.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,11 +59,36 @@ pub async fn verify<R: Resolver>(resolver: &R, message: &[u8], now: u64) -> Vec<
     let Ok(msg) = Message::parse(message) else {
         return Vec::new();
     };
-    let mut out = Vec::new();
-    for field in msg.headers_named("DKIM-Signature").take(MAX_SIGNATURES) {
-        out.push(verify_one(resolver, &msg, field.raw, field.value, now).await);
-    }
-    out
+    let checks = msg
+        .headers_named("DKIM-Signature")
+        .take(MAX_SIGNATURES)
+        .map(|field| verify_one(resolver, &msg, field.raw, field.value, now))
+        .collect();
+    join_all(checks).await
+}
+
+/// Runs futures concurrently and returns their outputs in order.
+async fn join_all<F: Future>(futures: Vec<F>) -> Vec<F::Output> {
+    let mut futures: Vec<Pin<Box<F>>> = futures.into_iter().map(Box::pin).collect();
+    let mut outputs: Vec<Option<F::Output>> = futures.iter().map(|_| None).collect();
+    std::future::poll_fn(|cx| {
+        let mut pending = false;
+        for (f, out) in futures.iter_mut().zip(outputs.iter_mut()) {
+            if out.is_none() {
+                match f.as_mut().poll(cx) {
+                    Poll::Ready(v) => *out = Some(v),
+                    Poll::Pending => pending = true,
+                }
+            }
+        }
+        if pending {
+            Poll::Pending
+        } else {
+            Poll::Ready(())
+        }
+    })
+    .await;
+    outputs.into_iter().flatten().collect()
 }
 
 async fn verify_one<R: Resolver>(
@@ -88,7 +122,11 @@ async fn verify_one<R: Resolver>(
     }
     // RFC 6376 §3.6.2.1: the key lives at <selector>._domainkey.<domain>.
     let name = format!("{}._domainkey.{}", sig.selector, sig.domain);
-    let key = match resolver.txt(&name).await {
+    let Ok(lookup) = tokio::time::timeout(KEY_TIMEOUT, resolver.txt(&name)).await else {
+        v.result = DkimResult::TempError("key lookup timed out");
+        return v;
+    };
+    let key = match lookup {
         Ok(answer) => {
             // RFC 6376 §6.1.2: with several records, use one that parses.
             let mut first_err = None;
@@ -174,4 +212,30 @@ async fn verify_one<R: Resolver>(
     }
     v.result = DkimResult::Pass;
     v
+}
+
+#[cfg(test)]
+mod timeout_tests {
+    use dns::testing::StaticResolver;
+
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn hanging_key_lookups_time_out_together() {
+        let r = StaticResolver::new()
+            .with_hang("a._domainkey.slow.example")
+            .with_hang("b._domainkey.slow.example");
+        let msg = b"DKIM-Signature: v=1; a=ed25519-sha256; d=slow.example; s=a; h=from; bh=AAAA; b=AAAA\r\n\
+DKIM-Signature: v=1; a=ed25519-sha256; d=slow.example; s=b; h=from; bh=AAAA; b=AAAA\r\n\
+From: x@slow.example\r\n\r\nbody\r\n";
+        let started = tokio::time::Instant::now();
+        let out = verify(&r, msg, 0).await;
+        assert_eq!(out.len(), 2);
+        assert!(
+            out.iter()
+                .all(|v| v.result == DkimResult::TempError("key lookup timed out"))
+        );
+        // Concurrent: one timeout, not two in a row.
+        assert!(started.elapsed() < KEY_TIMEOUT * 2);
+    }
 }

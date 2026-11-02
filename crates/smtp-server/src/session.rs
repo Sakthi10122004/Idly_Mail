@@ -565,6 +565,7 @@ where
             .as_ref()
             .map(|(u, _)| u.clone())
             .unwrap_or_default();
+        let accounts_for_log = accounts.clone();
         let account = match credentials {
             Some((user, pass)) => {
                 // Argon2 is CPU-heavy: at most a few checks at once, each on
@@ -581,7 +582,7 @@ where
         };
         match account {
             Some(account) => {
-                self.server.guard.success(self.client_ip, &username);
+                self.server.guard.success(&username);
                 tracing::info!(client_ip = %self.client_ip, account = %account, "authenticated");
                 self.auth = Some(account);
                 // RFC 4954 §6.
@@ -591,7 +592,12 @@ where
             None => {
                 let delay = self.server.guard.failure(self.client_ip, &username);
                 self.server.observer.auth_failure(self.client_ip);
-                tracing::warn!(client_ip = %self.client_ip, username = %username, "authentication failed");
+                // Only existing account names are logged: a user who types the
+                // password into the user-name field must not leak it to logs.
+                let logged = accounts_for_log
+                    .account_name(&username)
+                    .unwrap_or_else(|| "unknown-user".to_owned());
+                tracing::warn!(client_ip = %self.client_ip, username = %logged, "authentication failed");
                 // The same reply, whether or not the account exists.
                 tokio::time::sleep(delay).await;
                 self.auth_failures = self.auth_failures.saturating_add(1);

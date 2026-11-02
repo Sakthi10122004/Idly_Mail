@@ -14,6 +14,7 @@ metrics = "127.0.0.1:9100"
 
 [[domain]]
 name = "demo.test"
+allow_unsigned = true              # the demo never sends, so it needs no DKIM key
 
 [[account]]
 address = "alice@demo.test"

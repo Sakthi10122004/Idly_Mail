@@ -9,315 +9,19 @@
     clippy::panic
 )]
 
-use std::collections::HashMap;
-use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+mod common;
+
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
+use common::*;
 use dns::testing::StaticResolver;
 use mail_auth_glue::dkim::{self, DkimResult, Signer, SigningKey};
-use smtp_proto::{ForwardPath, Host, Reply};
-use smtp_server::{
-    Accounts, AuthLimits, Directory, DkimKeys, Envelope, InboundConfig, Mode, Observer, Rcpt,
-    Recipient, Server, Sink,
-};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
-
-// ---------------------------------------------------------------- fixtures
-
-struct Dir;
-
-impl Directory for Dir {
-    fn resolve(&self, to: &ForwardPath) -> Recipient {
-        match to {
-            ForwardPath::Postmaster => Recipient::Local("alice@example.org".into()),
-            ForwardPath::Mailbox(m) => match &m.host {
-                Host::Domain(d) if d.eq_ignore_ascii_case("example.org") => {
-                    match m.local_part.to_lowercase().as_str() {
-                        "alice" | "bob" => {
-                            Recipient::Local(format!("{}@example.org", m.local_part.to_lowercase()))
-                        }
-                        _ => Recipient::UnknownUser,
-                    }
-                }
-                _ => Recipient::NotLocal,
-            },
-        }
-    }
-}
-
-/// Plaintext passwords, but `verify` sleeps to make concurrency visible.
-#[derive(Default)]
-struct TestAccounts {
-    running: AtomicUsize,
-    max_running: AtomicUsize,
-    calls: AtomicUsize,
-}
-
-impl Accounts for TestAccounts {
-    fn verify(&self, username: &str, password: &str) -> Option<String> {
-        let now = self.running.fetch_add(1, Ordering::SeqCst) + 1;
-        self.max_running.fetch_max(now, Ordering::SeqCst);
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        std::thread::sleep(Duration::from_millis(40));
-        self.running.fetch_sub(1, Ordering::SeqCst);
-        let users = [
-            ("alice@example.org", "alice-pw"),
-            ("bob@example.org", "bob-pw"),
-        ];
-        users
-            .iter()
-            .find(|(u, p)| u.eq_ignore_ascii_case(username) && *p == password)
-            .map(|(u, _)| (*u).to_owned())
-    }
-
-    fn may_send_as(&self, account: &str, address: &str) -> bool {
-        account.eq_ignore_ascii_case(address)
-    }
-}
-
-type Delivered = Vec<(Envelope, Vec<u8>)>;
-
-#[derive(Default, Clone)]
-struct Captured(Arc<Mutex<Delivered>>);
-
-impl Captured {
-    fn all(&self) -> Delivered {
-        self.0.lock().unwrap().clone()
-    }
-}
-
-struct CaptureSink(Captured);
-
-impl Sink for CaptureSink {
-    async fn deliver(&self, envelope: &Envelope, message: &[u8]) -> std::io::Result<()> {
-        self.0
-            .0
-            .lock()
-            .unwrap()
-            .push((envelope.clone(), message.to_vec()));
-        Ok(())
-    }
-}
-
-#[derive(Default)]
-struct Counts {
-    auth_failures: AtomicUsize,
-}
-
-struct Obs(Arc<Counts>);
-
-impl Observer for Obs {
-    fn auth_failure(&self, _: IpAddr) {
-        self.0.auth_failures.fetch_add(1, Ordering::SeqCst);
-    }
-}
-
-/// A self-signed certificate for mx.example.org.
-fn certificate() -> (Arc<rustls::ServerConfig>, Vec<u8>) {
-    let key = rcgen::generate_simple_self_signed(vec!["mx.example.org".to_owned()]).unwrap();
-    let cert_pem = key.cert.pem();
-    let key_pem = key.signing_key.serialize_pem();
-    let server = smtp_server::tls::server_config(cert_pem.as_bytes(), key_pem.as_bytes()).unwrap();
-    (server, key.cert.der().to_vec())
-}
-
-struct Harness {
-    addrs: HashMap<&'static str, SocketAddr>,
-    captured: Captured,
-    accounts: Arc<TestAccounts>,
-    counts: Arc<Counts>,
-    ca: Vec<u8>,
-}
-
-struct Setup {
-    config: InboundConfig,
-    resolver: StaticResolver,
-    dkim: Option<DkimKeys>,
-}
-
-impl Default for Setup {
-    fn default() -> Self {
-        let mut config = InboundConfig::new("mx.example.org");
-        config.inbound_checks = false;
-        Self {
-            config,
-            resolver: StaticResolver::new(),
-            dkim: None,
-        }
-    }
-}
-
-async fn start(setup: Setup) -> Harness {
-    let captured = Captured::default();
-    let accounts = Arc::new(TestAccounts::default());
-    let counts = Arc::new(Counts::default());
-    let (tls, ca) = certificate();
-    let mut server = Server::new(
-        setup.config,
-        Dir,
-        CaptureSink(captured.clone()),
-        Obs(counts.clone()),
-        setup.resolver,
-    )
-    .with_tls(tls)
-    .with_accounts(accounts.clone());
-    if let Some(k) = setup.dkim {
-        server = server.with_dkim(Arc::new(k));
-    }
-    let server = server.shared();
-    let mut addrs = HashMap::new();
-    for (name, mode) in [
-        ("25", Mode::Inbound),
-        ("587", Mode::Submission),
-        ("465", Mode::SubmissionImplicitTls),
-    ] {
-        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        addrs.insert(name, l.local_addr().unwrap());
-        tokio::spawn(server.clone().run(l, mode));
-    }
-    Harness {
-        addrs,
-        captured,
-        accounts,
-        counts,
-        ca,
-    }
-}
-
-// ---------------------------------------------------------------- client
-
-enum Stream {
-    Plain(TcpStream),
-    Tls(Box<tokio_rustls::client::TlsStream<TcpStream>>),
-    Gone,
-}
-
-struct Client {
-    stream: Stream,
-    buf: Vec<u8>,
-    ca: Vec<u8>,
-}
-
-fn connector(ca: &[u8]) -> tokio_rustls::TlsConnector {
-    let mut roots = rustls::RootCertStore::empty();
-    roots
-        .add(rustls_pki_types::CertificateDer::from(ca.to_vec()))
-        .unwrap();
-    let config = rustls::ClientConfig::builder_with_provider(Arc::new(
-        rustls::crypto::ring::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()
-    .unwrap()
-    .with_root_certificates(roots)
-    .with_no_client_auth();
-    tokio_rustls::TlsConnector::from(Arc::new(config))
-}
-
-async fn tls_wrap(ca: &[u8], tcp: TcpStream) -> tokio_rustls::client::TlsStream<TcpStream> {
-    let name = rustls_pki_types::ServerName::try_from("mx.example.org").unwrap();
-    connector(ca).connect(name, tcp).await.unwrap()
-}
-
-impl Client {
-    async fn connect(h: &Harness, port: &str) -> (Self, Reply) {
-        let tcp = TcpStream::connect(h.addrs[port]).await.unwrap();
-        let mut c = Self {
-            stream: Stream::Plain(tcp),
-            buf: Vec::new(),
-            ca: h.ca.clone(),
-        };
-        let g = c.reply().await.expect("greeting");
-        (c, g)
-    }
-
-    async fn connect_implicit_tls(h: &Harness) -> (Self, Reply) {
-        let tcp = TcpStream::connect(h.addrs["465"]).await.unwrap();
-        let tls = tls_wrap(&h.ca, tcp).await;
-        let mut c = Self {
-            stream: Stream::Tls(Box::new(tls)),
-            buf: Vec::new(),
-            ca: h.ca.clone(),
-        };
-        let g = c.reply().await.expect("greeting");
-        (c, g)
-    }
-
-    async fn send(&mut self, b: &[u8]) {
-        let r = match &mut self.stream {
-            Stream::Plain(s) => s.write_all(b).await,
-            Stream::Tls(s) => s.write_all(b).await,
-            Stream::Gone => return,
-        };
-        let _ = r;
-    }
-
-    async fn read_some(&mut self) -> usize {
-        let mut chunk = [0u8; 8192];
-        let fut = async {
-            match &mut self.stream {
-                Stream::Plain(s) => s.read(&mut chunk).await,
-                Stream::Tls(s) => s.read(&mut chunk).await,
-                Stream::Gone => Ok(0),
-            }
-        };
-        let n = tokio::time::timeout(Duration::from_secs(10), fut)
-            .await
-            .expect("server did not answer")
-            .unwrap_or(0);
-        self.buf.extend_from_slice(&chunk[..n]);
-        n
-    }
-
-    async fn reply(&mut self) -> Option<Reply> {
-        loop {
-            if let Some((r, n)) = Reply::parse(&self.buf, 4096).unwrap() {
-                self.buf.drain(..n);
-                return Some(r);
-            }
-            if self.read_some().await == 0 {
-                return None;
-            }
-        }
-    }
-
-    async fn cmd(&mut self, line: &str) -> Reply {
-        self.send(format!("{line}\r\n").as_bytes()).await;
-        self.reply().await.expect("reply")
-    }
-
-    async fn is_closed(&mut self) -> bool {
-        self.reply().await.is_none()
-    }
-
-    async fn starttls(&mut self) {
-        let r = self.cmd("STARTTLS").await;
-        assert_eq!(r.code, 220, "{r:?}");
-        let Stream::Plain(tcp) = std::mem::replace(&mut self.stream, Stream::Gone) else {
-            panic!("already TLS")
-        };
-        self.stream = Stream::Tls(Box::new(tls_wrap(&self.ca, tcp).await));
-    }
-
-    async fn login(&mut self, user: &str, pass: &str) -> Reply {
-        let plain = STANDARD.encode(format!("\0{user}\0{pass}"));
-        self.cmd(&format!("AUTH PLAIN {plain}")).await
-    }
-
-    async fn ehlo_caps(&mut self) -> Vec<String> {
-        let r = self.cmd("EHLO client.example.net").await;
-        assert_eq!(r.code, 250);
-        r.lines
-    }
-}
-
-fn enhanced(r: &Reply) -> String {
-    r.enhanced.map(|e| e.to_string()).unwrap_or_default()
-}
+use smtp_proto::Reply;
+use smtp_server::{AuthLimits, DkimKeys, Rcpt};
 
 // ---------------------------------------------------------------- 1. STARTTLS injection
 
@@ -894,5 +598,78 @@ async fn authenticated_submission_skips_inbound_dmarc() {
     assert!(!env.junk);
 }
 
-#[allow(dead_code)]
-fn assert_send<T: AsyncRead + AsyncWrite + Send>() {}
+#[tokio::test]
+async fn slow_attacker_dns_cannot_defeat_dmarc_reject() {
+    // A spoofed From of a p=reject domain. The attacker signs with its own
+    // valid key for attacker.example and makes that domain's DMARC Tree
+    // Walk hang; a second signature's key lookup hangs too. Neither may turn
+    // the DMARC fail into a fail-open temperror.
+    let key = dkim::keygen::ed25519().unwrap();
+    let signer = Signer::new(
+        SigningKey::from_pkcs8(&key.private_pkcs8).unwrap(),
+        "attacker.example",
+        "s",
+    )
+    .unwrap();
+    let body = "From: CEO <ceo@bank.example>\r\nTo: bob@example.org\r\nSubject: wire the money\r\n\r\nnow\r\n";
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let signature = signer.sign(body.as_bytes(), now).unwrap();
+    let slow =
+        "DKIM-Signature: v=1; a=ed25519-sha256; d=slow.example; s=x; h=from; bh=AAAA; b=AAAA\r\n";
+    let message = format!("{slow}{signature}{body}");
+
+    let h = start(inbound_setup(|r| {
+        r.with_txt("_dmarc.bank.example", "v=DMARC1; p=reject")
+            .with_txt("s._domainkey.attacker.example", &key.dns_record)
+            .with_hang("_dmarc.attacker.example")
+            .with_hang("x._domainkey.slow.example")
+            .with_hang("attacker.example")
+    }))
+    .await;
+    let (mut c, _) = Client::connect(&h, "25").await;
+    c.cmd("EHLO mail.attacker.example").await;
+    c.cmd("MAIL FROM:<ceo@attacker.example>").await;
+    c.cmd("RCPT TO:<bob@example.org>").await;
+    c.cmd("DATA").await;
+    let started = Instant::now();
+    c.send(format!("{message}.\r\n").as_bytes()).await;
+    let r = c.reply().await.unwrap();
+    assert_eq!((r.code, enhanced(&r)), (550, "5.7.1".into()), "{r:?}");
+    assert!(h.captured.all().is_empty(), "never delivered");
+    // Bounded by the per-lookup budgets, not the backstop.
+    // SPF (20 s, RFC 7208 §4.6.4) and DKIM run together, then one 3 s walk.
+    assert!(
+        started.elapsed() < Duration::from_secs(40),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+#[tokio::test]
+async fn port_25_flood_does_not_lock_out_submission() {
+    let mut setup = Setup::default();
+    setup.config.max_connections = 2;
+    setup.config.max_submission_connections = 1;
+    let h = start(setup).await;
+    // Fill the inbound pool.
+    let (_a, g1) = Client::connect(&h, "25").await;
+    let (_b, g2) = Client::connect(&h, "25").await;
+    assert_eq!((g1.code, g2.code), (220, 220));
+    let (mut c, g) = Client::connect(&h, "25").await;
+    assert_eq!(g.code, 421, "inbound pool full");
+    assert!(c.is_closed().await);
+    // Submission still works, on both ports, from its own pool.
+    let (mut s, g) = Client::connect(&h, "587").await;
+    assert_eq!(g.code, 220);
+    s.cmd("QUIT").await;
+    drop(s);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let mut s = logged_in(&h, "alice@example.org", "alice-pw").await;
+    assert_eq!(s.cmd("NOOP").await.code, 250);
+    // ...and that pool has its own limit.
+    let (_, g) = Client::connect(&h, "587").await;
+    assert_eq!(g.code, 421, "submission pool full");
+}

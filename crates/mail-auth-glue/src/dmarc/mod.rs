@@ -5,6 +5,7 @@
 pub mod record;
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use dns::Resolver;
 
@@ -17,6 +18,21 @@ use record::{Alignment, Policy, Psd, Record};
 const MAX_AUTHOR_DOMAINS: usize = 3;
 /// DKIM-Authenticated Identifiers considered for alignment.
 const MAX_DKIM_DOMAINS: usize = 4;
+/// Policy discovery for one Author Domain (its record, the Tree Walk
+/// above it, its Organizational Domain). Only a failure here makes the
+/// result temperror.
+pub const AUTHOR_TIMEOUT: Duration = Duration::from_secs(10);
+/// The Tree Walk for one SPF or DKIM identifier. Those domains are chosen
+/// by the sender, who may be an attacker with deliberately slow DNS, so a
+/// timeout or error only means that identifier is not aligned: it can
+/// never turn a DMARC fail into temperror.
+pub const IDENTIFIER_TIMEOUT: Duration = Duration::from_secs(3);
+/// The longest `evaluate` can take: discovery plus every identifier, for
+/// each Author Domain.
+pub const MAX_DURATION: Duration = Duration::from_secs(
+    MAX_AUTHOR_DOMAINS as u64
+        * (AUTHOR_TIMEOUT.as_secs() + (1 + MAX_DKIM_DOMAINS as u64) * IDENTIFIER_TIMEOUT.as_secs()),
+);
 
 /// The DMARC result (RFC 8601 §2.7.4, RFC 9989 §9.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -206,35 +222,81 @@ impl<R: Resolver> Walker<'_, R> {
     }
 
     /// Whether `id` aligns with `author` in `mode` (RFC 9989 §3.2.10).
-    async fn aligned(
-        &mut self,
-        author: &str,
-        id: &str,
-        mode: Alignment,
-        author_org: &str,
-    ) -> Result<bool, Temp> {
+    /// A DNS error or timeout for `id` means "not aligned", never an error.
+    async fn aligned(&mut self, author: &str, id: &str, mode: Alignment, author_org: &str) -> bool {
         if author == id {
-            return Ok(true);
+            return true;
         }
         if mode == Alignment::Strict {
-            return Ok(false);
+            return false;
         }
-        Ok(self.org_domain(id).await? == author_org)
+        match tokio::time::timeout(IDENTIFIER_TIMEOUT, self.org_domain(id)).await {
+            Ok(Ok(org)) => org == author_org,
+            Ok(Err(Temp)) | Err(_) => false,
+        }
     }
 
     async fn evaluate_one(&mut self, author: &str, inputs: &Inputs<'_>) -> Result<Outcome, Temp> {
         let mut out = Outcome::new(DmarcResult::None);
         out.author_domain = Some(author.to_owned());
+        let discovered = tokio::time::timeout(AUTHOR_TIMEOUT, self.discover(author))
+            .await
+            .map_err(|_| Temp)??;
+        let Some((record, mut policy, author_org)) = discovered else {
+            // No DMARC Policy Record: DMARC does not apply.
+            return Ok(out);
+        };
+        if record.testing {
+            policy = policy.downgraded();
+            out.testing = true;
+        }
 
-        // RFC 9989 §4.10.1: policy discovery.
+        // RFC 9989 §4.4.2: an SPF pass for the MAIL FROM domain.
+        let (spf_result, spf_domain) = inputs.spf;
+        let mut pass = spf_result == SpfResult::Pass
+            && self
+                .aligned(author, &ascii_lower(spf_domain), record.aspf, &author_org)
+                .await;
+        // RFC 9989 §4.4.1: any passing DKIM signature whose d= aligns.
+        // Identifiers equal to the Author Domain go first: they need no DNS.
+        if !pass {
+            let mut dkim: Vec<String> = inputs
+                .dkim
+                .iter()
+                .filter(|v| v.result == DkimResult::Pass)
+                .filter_map(|v| v.domain.as_deref())
+                .map(ascii_lower)
+                .collect();
+            dkim.sort_by_key(|d| d != author);
+            dkim.dedup();
+            for d in dkim.iter().take(MAX_DKIM_DOMAINS) {
+                if self.aligned(author, d, record.adkim, &author_org).await {
+                    pass = true;
+                    break;
+                }
+            }
+        }
+        // RFC 9989 §5.3.5.
+        if pass {
+            out.result = DmarcResult::Pass;
+        } else {
+            out.result = DmarcResult::Fail;
+            out.disposition = policy;
+        }
+        Ok(out)
+    }
+
+    /// Policy discovery for `author` (RFC 9989 §4.10.1): the record that
+    /// applies, the requested policy before any `t=y` downgrade, and the
+    /// Organizational Domain. `None` if no DMARC processing applies.
+    async fn discover(&mut self, author: &str) -> Result<Option<(Record, Policy, String)>, Temp> {
         let (record, own_record) = match self.fetch(author).await? {
             Some(r) => (r, true),
             None => {
                 let above = walk_targets(author, false);
                 let found = self.walk(&above).await?;
                 if found.is_empty() {
-                    // No DMARC Policy Record: DMARC does not apply.
-                    return Ok(out);
+                    return Ok(None);
                 }
                 let org = select_org(author, &found);
                 // The record at the Organizational Domain, else the PSD's.
@@ -245,15 +307,15 @@ impl<R: Resolver> Walker<'_, R> {
                     .map(|(_, r)| r.clone());
                 match r {
                     Some(r) => (r, false),
-                    None => return Ok(out),
+                    None => return Ok(None),
                 }
             }
         };
         // RFC 9989 §4.10.1: a missing or invalid p (or invalid sp/np) means
         // p=none if rua has a valid URI, otherwise no DMARC processing.
-        let mut policy = if record.policy_problem {
+        let policy = if record.policy_problem {
             if !record.rua_valid {
-                return Ok(out);
+                return Ok(None);
             }
             Policy::None
         } else if own_record {
@@ -273,11 +335,6 @@ impl<R: Resolver> Walker<'_, R> {
             };
             sub.or(record.p).unwrap_or(Policy::None)
         };
-        if record.testing {
-            policy = policy.downgraded();
-            out.testing = true;
-        }
-
         // RFC 9989 §4.10.2: when every identifier equals the Author Domain
         // and it has a record, it is its own Organizational Domain.
         let author_org = if own_record && record.psd == Psd::No {
@@ -285,37 +342,7 @@ impl<R: Resolver> Walker<'_, R> {
         } else {
             self.org_domain(author).await?
         };
-
-        // RFC 9989 §4.4.2: an SPF pass for the MAIL FROM domain.
-        let (spf_result, spf_domain) = inputs.spf;
-        let mut pass = spf_result == SpfResult::Pass
-            && self
-                .aligned(author, &ascii_lower(spf_domain), record.aspf, &author_org)
-                .await?;
-        // RFC 9989 §4.4.1: any passing DKIM signature whose d= aligns.
-        if !pass {
-            let mut dkim: Vec<&str> = inputs
-                .dkim
-                .iter()
-                .filter(|v| v.result == DkimResult::Pass)
-                .filter_map(|v| v.domain.as_deref())
-                .collect();
-            dkim.dedup();
-            for d in dkim.into_iter().take(MAX_DKIM_DOMAINS) {
-                if self.aligned(author, d, record.adkim, &author_org).await? {
-                    pass = true;
-                    break;
-                }
-            }
-        }
-        // RFC 9989 §5.3.5.
-        if pass {
-            out.result = DmarcResult::Pass;
-        } else {
-            out.result = DmarcResult::Fail;
-            out.disposition = policy;
-        }
-        Ok(out)
+        Ok(Some((record, policy, author_org)))
     }
 }
 

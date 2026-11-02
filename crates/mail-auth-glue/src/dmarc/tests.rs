@@ -371,3 +371,86 @@ async fn international_author_domain() {
     .await;
     assert_eq!(o.result, DmarcResult::Pass);
 }
+
+// Attacker-controlled DNS (CLAUDE.md, inbound rule 6): slow lookups for
+// SPF/DKIM identifiers can never turn a DMARC fail into temperror.
+
+#[tokio::test(start_paused = true)]
+async fn hanging_identifier_walk_is_not_aligned() {
+    // The attacker signs with its own valid key, then makes the Tree Walk
+    // for its d= domain hang, hoping for a fail-open temperror.
+    let r = example_com("v=DMARC1; p=reject")
+        .with_hang("_dmarc.attacker.example")
+        .with_hang("_dmarc.example");
+    let o = run(
+        &r,
+        "ceo@example.com",
+        (SpfResult::Pass, "attacker.example"),
+        &[dkim_pass("attacker.example")],
+    )
+    .await;
+    assert_eq!(o.result, DmarcResult::Fail);
+    assert_eq!(o.disposition, Policy::Reject);
+}
+
+#[tokio::test(start_paused = true)]
+async fn failing_identifier_walk_is_not_aligned() {
+    let r = example_com("v=DMARC1; p=reject").with_failure(
+        "_dmarc.attacker.example",
+        dns::Error::Temporary("servfail".into()),
+    );
+    let o = run(
+        &r,
+        "ceo@example.com",
+        (SpfResult::None, "attacker.example"),
+        &[dkim_pass("attacker.example")],
+    )
+    .await;
+    assert_eq!(
+        (o.result, o.disposition),
+        (DmarcResult::Fail, Policy::Reject)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn hanging_identifier_does_not_hide_an_aligned_one() {
+    // A slow attacker signature listed first doesn't stop the real
+    // signature from aligning.
+    let r = example_com("v=DMARC1; p=reject").with_hang("_dmarc.attacker.example");
+    let o = run(
+        &r,
+        "ceo@example.com",
+        (SpfResult::None, ""),
+        &[dkim_pass("attacker.example"), dkim_pass("mail.example.com")],
+    )
+    .await;
+    assert_eq!(o.result, DmarcResult::Pass);
+}
+
+#[tokio::test(start_paused = true)]
+async fn author_discovery_timeout_is_temperror() {
+    // The Author Domain's own policy discovery is the only temperror source.
+    let r = StaticResolver::new().with_hang("_dmarc.example.com");
+    let started = tokio::time::Instant::now();
+    let o = run(&r, "ceo@example.com", (SpfResult::Pass, "example.com"), &[]).await;
+    assert_eq!(o.result, DmarcResult::TempError);
+    assert!(started.elapsed() <= AUTHOR_TIMEOUT + Duration::from_secs(1));
+}
+
+#[tokio::test(start_paused = true)]
+async fn attacker_author_domain_cannot_mask_a_victim() {
+    // Two Author Domains: the victim's p=reject fail beats the attacker
+    // domain's temperror.
+    let r = example_com("v=DMARC1; p=reject").with_hang("_dmarc.attacker.example");
+    let o = run(
+        &r,
+        "ceo@example.com, x@attacker.example",
+        (SpfResult::None, ""),
+        &[],
+    )
+    .await;
+    assert_eq!(
+        (o.result, o.disposition),
+        (DmarcResult::Fail, Policy::Reject)
+    );
+}

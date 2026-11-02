@@ -30,7 +30,8 @@ command_timeout = 300       # seconds waiting for a command (RFC minimum: 300)
 data_timeout = 300          # seconds waiting for message data
 tls_handshake_timeout = 30  # seconds
 session_timeout = 1800      # hard cap on one SMTP session, seconds
-max_connections = 100       # simultaneous SMTP connections
+max_connections = 100       # simultaneous connections on port 25
+max_submission_connections = 50  # on 587/465, a separate pool
 
 # TLS certificate for STARTTLS (25, 587) and implicit TLS (465), PEM files.
 # Without it, port 25 runs without STARTTLS and 587/465 are not started,
@@ -42,6 +43,9 @@ key_file = "/etc/idly/tls/privkey.pem"
 # Domains this server handles. Repeat the block for each domain.
 [[domain]]
 name = "example.org"
+# Without a DKIM key (see below) idly refuses to start. Set this only if you
+# really want this domain's mail sent unsigned (it will fail DMARC).
+# allow_unsigned = true
 
 # Accounts that may send mail through submission (587/465). An account may
 # only send as its own address (MAIL FROM and the From header).

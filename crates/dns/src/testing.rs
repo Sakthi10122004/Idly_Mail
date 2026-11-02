@@ -17,6 +17,8 @@ struct Entry {
     ptr: Vec<String>,
     /// Forced result for every lookup of this name.
     fail: Option<Error>,
+    /// Every lookup of this name never answers (an attacker's slow DNS).
+    hang: bool,
 }
 
 /// A static zone. Lookups of unknown names give NXDOMAIN; a known name
@@ -88,12 +90,18 @@ impl StaticResolver {
         self
     }
 
+    /// Make every lookup of `name` hang forever; callers must time out.
+    pub fn with_hang(mut self, name: &str) -> Self {
+        self.entry(name).hang = true;
+        self
+    }
+
     /// Every query so far, as "TYPE name".
     pub fn queries(&self) -> Vec<String> {
         self.log.lock().map(|l| l.clone()).unwrap_or_default()
     }
 
-    fn lookup<T: Clone>(
+    async fn lookup<T: Clone>(
         &self,
         rtype: &str,
         name: &str,
@@ -104,6 +112,9 @@ impl StaticResolver {
             log.push(format!("{rtype} {name}"));
         }
         let entry = self.entries.get(&name).ok_or(Error::NxDomain)?;
+        if entry.hang {
+            std::future::pending::<()>().await;
+        }
         if let Some(e) = &entry.fail {
             return Err(e.clone());
         }
@@ -128,22 +139,22 @@ fn ptr_key(ip: IpAddr) -> String {
 
 impl Resolver for StaticResolver {
     async fn mx(&self, name: &str) -> Result<Answer<Mx>, Error> {
-        self.lookup("MX", name, |e| &e.mx)
+        self.lookup("MX", name, |e| &e.mx).await
     }
     async fn a(&self, name: &str) -> Result<Answer<IpAddr>, Error> {
-        self.lookup("A", name, |e| &e.a)
+        self.lookup("A", name, |e| &e.a).await
     }
     async fn aaaa(&self, name: &str) -> Result<Answer<IpAddr>, Error> {
-        self.lookup("AAAA", name, |e| &e.aaaa)
+        self.lookup("AAAA", name, |e| &e.aaaa).await
     }
     async fn txt(&self, name: &str) -> Result<Answer<Vec<u8>>, Error> {
-        self.lookup("TXT", name, |e| &e.txt)
+        self.lookup("TXT", name, |e| &e.txt).await
     }
     async fn tlsa(&self, name: &str) -> Result<Answer<Tlsa>, Error> {
-        self.lookup("TLSA", name, |e| &e.tlsa)
+        self.lookup("TLSA", name, |e| &e.tlsa).await
     }
     async fn ptr(&self, ip: IpAddr) -> Result<Answer<String>, Error> {
-        self.lookup("PTR", &ptr_key(ip), |e| &e.ptr)
+        self.lookup("PTR", &ptr_key(ip), |e| &e.ptr).await
     }
 }
 

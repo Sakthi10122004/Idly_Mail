@@ -158,9 +158,10 @@ grouped by development phase (see the roadmap in [README.md](README.md)).
   writes RSA and Ed25519 keys under `<data_dir>/dkim/` (mode 0600) and
   prints the TXT records to publish.
 - **Metric** `idly_auth_failures_total`.
-- **Fuzz targets** `mime_fix` (the long-line re-encoder) and
+- **Fuzz targets** `mime_fix` (the long-line re-encoder),
   `smtp_session`, which feeds arbitrary bytes into whole server sessions
-  over plaintext, STARTTLS, implicit TLS and authenticated submission.
+  over plaintext, STARTTLS, implicit TLS and authenticated submission, and
+  the faster `smtp_session_plain`, which needs no client-side TLS.
 #### Changed
 - **Paths without angle brackets are accepted** (`MAIL FROM:user@example.com`,
   with or without a space after the colon), parsed as if bracketed. The
@@ -234,6 +235,30 @@ grouped by development phase (see the roadmap in [README.md](README.md)).
   - Failures are logged with the IP and user name, never the password.
 - **Forged Authentication-Results fields are removed** from inbound mail
   before Idly adds its own (RFC 8601 §5).
+- **Slow DNS can't be used to slip past DMARC.** A forger could have made
+  its own domain's DNS hang until the inbound checks timed out, turning a
+  DMARC `p=reject` failure into a fail-open delivery. Now:
+  - each lookup whose domain the sender chooses has its own timeout: the
+    SPF evaluation (20 s), each DKIM key (5 s, all looked up at once), and
+    each SPF/DKIM identifier's DMARC Tree Walk (3 s);
+  - a timeout or error there only means that identifier didn't pass;
+  - DMARC is `temperror` only when the From domain's own policy lookup
+    fails.
+- **Login limits count an IPv6 /64 as one client**, so rotating addresses
+  within a /64 doesn't escape them. IPv4-mapped IPv6 addresses count as
+  their IPv4 address. A successful login no longer resets the IP's
+  failure count, so one valid account can't be used to keep guessing
+  others.
+- **Failed logins log the user name only if the account exists**;
+  otherwise they log `unknown-user`, so a password typed into the
+  user-name field never reaches the logs.
+- **Separate connection limits for port 25 and submission**
+  (`limits.max_connections`, default 100, and
+  `limits.max_submission_connections`, default 50), so a flood on port 25
+  can't lock users out.
+- **A local domain without a DKIM key stops `idly serve` and
+  `idly check-config`**, unless the domain sets `allow_unsigned = true`,
+  which logs a warning. `--demo` is unaffected.
 - **`hickory-recursor` is banned.** It has a cache-poisoning advisory,
   RUSTSEC-2026-0106, with no fixed release.
 

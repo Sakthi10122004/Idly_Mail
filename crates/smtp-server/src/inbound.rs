@@ -23,9 +23,22 @@ pub(crate) enum Decision {
     Reject,
 }
 
-/// SPF, DKIM and DMARC together get this long; past it, the message is
-/// treated as a temperror and delivered (fail open, CLAUDE.md).
-const CHECK_TIMEOUT: Duration = Duration::from_secs(60);
+/// A backstop only. Every lookup whose domain the sender chooses has its
+/// own, shorter budget (SPF's time limit, each DKIM key lookup, each DMARC
+/// identifier walk), and those can only make that one identifier not pass.
+/// The sum of all budgets is below this, so slow attacker DNS can never
+/// reach it and turn a DMARC fail into a fail-open delivery (CLAUDE.md).
+const CHECK_BACKSTOP: Duration = Duration::from_secs(
+    max_secs(spf::TIMEOUT, dkim::KEY_TIMEOUT) + dmarc::MAX_DURATION.as_secs() + 30,
+);
+
+const fn max_secs(a: Duration, b: Duration) -> u64 {
+    if a.as_secs() > b.as_secs() {
+        a.as_secs()
+    } else {
+        b.as_secs()
+    }
+}
 
 /// The MAIL FROM address with its domain in A-label form, for SPF.
 fn spf_sender(from: &ReversePath) -> Option<String> {
@@ -64,9 +77,11 @@ pub(crate) async fn check<R: Resolver>(
         .map_or(0, |d| d.as_secs());
 
     let checks = async {
-        let (spf_result, spf_domain) =
-            spf::check_mail_from(resolver, client_ip, sender.as_deref(), &helo).await;
-        let dkim_results = dkim::verify(resolver, &message, now).await;
+        // SPF and DKIM are independent: run them at the same time.
+        let ((spf_result, spf_domain), dkim_results) = tokio::join!(
+            spf::check_mail_from(resolver, client_ip, sender.as_deref(), &helo),
+            dkim::verify(resolver, &message, now)
+        );
         let inputs = dmarc::Inputs {
             spf: (spf_result, &spf_domain),
             dkim: &dkim_results,
@@ -75,9 +90,10 @@ pub(crate) async fn check<R: Resolver>(
         (spf_result, spf_domain.clone(), dkim_results, dmarc_outcome)
     };
     let Ok((spf_result, spf_domain, dkim_results, dmarc_outcome)) =
-        tokio::time::timeout(CHECK_TIMEOUT, checks).await
+        tokio::time::timeout(CHECK_BACKSTOP, checks).await
     else {
-        tracing::warn!(%client_ip, "authentication checks timed out; delivering (fail open)");
+        // Unreachable by design (see CHECK_BACKSTOP): a bug, not DNS trouble.
+        tracing::error!(%client_ip, "authentication checks overran every budget; delivering (fail open)");
         let header = format!(
             "Authentication-Results: {hostname};\r\n\tspf=temperror;\r\n\tdkim=temperror;\r\n\tdmarc=temperror\r\n"
         );

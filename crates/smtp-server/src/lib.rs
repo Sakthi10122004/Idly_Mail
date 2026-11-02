@@ -68,8 +68,11 @@ pub struct InboundConfig {
     /// Hard cap on a whole session, so slow clients can't hold
     /// connections forever.
     pub session_timeout: Duration,
-    /// Simultaneous connections; more get 421 and are closed.
+    /// Simultaneous connections on port 25; more get 421 and are closed.
     pub max_connections: usize,
+    /// Simultaneous submission connections (587 and 465), counted
+    /// separately so a flood on port 25 can't lock users out.
+    pub max_submission_connections: usize,
     /// Run SPF, DKIM and DMARC on inbound mail (off in `--demo`).
     pub inbound_checks: bool,
     /// Test mode: submission accepts remote recipients only in these domains.
@@ -94,6 +97,7 @@ impl InboundConfig {
             tls_handshake_timeout: Duration::from_secs(30),
             session_timeout: Duration::from_secs(30 * 60),
             max_connections: 100,
+            max_submission_connections: 50,
             inbound_checks: true,
             test_mode_allow: None,
             auth_limits: AuthLimits::default(),
@@ -281,6 +285,7 @@ pub struct Server<D, K, O, R> {
     dkim: Option<Arc<DkimKeys>>,
     guard: auth::Guard,
     connections: Semaphore,
+    submission_connections: Semaphore,
 }
 
 impl<D, K, O, R> std::fmt::Debug for Server<D, K, O, R> {
@@ -296,6 +301,7 @@ impl<D: Directory, K: Sink, O: Observer, R: dns::Resolver + 'static> Server<D, K
     /// methods, then call [`Server::shared`].
     pub fn new(config: InboundConfig, directory: D, sink: K, observer: O, resolver: R) -> Self {
         let connections = Semaphore::new(config.max_connections);
+        let submission_connections = Semaphore::new(config.max_submission_connections);
         let guard = auth::Guard::new(config.auth_limits.clone());
         Self {
             config,
@@ -308,6 +314,7 @@ impl<D: Directory, K: Sink, O: Observer, R: dns::Resolver + 'static> Server<D, K
             dkim: None,
             guard,
             connections,
+            submission_connections,
         }
     }
 
@@ -349,7 +356,11 @@ impl<D: Directory, K: Sink, O: Observer, R: dns::Resolver + 'static> Server<D, K
     where
         S: AsyncRead + AsyncWrite + Unpin + Send,
     {
-        let permit = self.connections.try_acquire();
+        let pool = match mode {
+            Mode::Inbound => &self.connections,
+            Mode::Submission | Mode::SubmissionImplicitTls => &self.submission_connections,
+        };
+        let permit = pool.try_acquire();
         session::run(self, stream, client_ip, mode, permit.is_ok()).await;
     }
 }

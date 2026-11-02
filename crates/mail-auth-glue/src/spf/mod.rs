@@ -54,7 +54,7 @@ const MAX_VOID_LOOKUPS: u32 = 2;
 /// MX or PTR evaluation.
 const MAX_MX_OR_PTR: usize = 10;
 /// RFC 7208 §4.6.4: limit the time for check_host(); at least 20 seconds.
-const TIMEOUT: Duration = Duration::from_secs(20);
+pub const TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Checks the MAIL FROM identity (RFC 7208 §2.4). `mail_from` is None for
 /// the null reverse-path, in which case `postmaster@<helo>` is checked.
