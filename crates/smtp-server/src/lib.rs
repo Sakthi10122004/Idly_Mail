@@ -1,13 +1,14 @@
-//! Inbound SMTP for Idly Mail.
+//! SMTP listeners for Idly Mail: inbound mail on port 25, and message
+//! submission on ports 587 (STARTTLS) and 465 (implicit TLS).
 //!
-//! This crate accepts mail for local recipients and hands it to a [`Sink`].
-//! It has no way to send mail anywhere: it does not depend on the outbound
-//! client, and it rejects every recipient that the [`Directory`] does not
-//! map to a local account (no open relay).
+//! Inbound (port 25) accepts mail only for local recipients: everything the
+//! [`Directory`] doesn't map to a local account is refused (no open relay).
+//! Only an authenticated submission may name remote recipients, and those
+//! go to the outbound queue. This crate never connects anywhere itself.
 //!
 //! Strictness comes from `smtp-proto`: only CRLF ends a line, only
-//! `CRLF.CRLF` ends DATA, and a bare CR or LF in message data drops the
-//! connection and the partial message (CLAUDE.md, SMTP smuggling).
+//! `CRLF.CRLF` ends DATA, and a bare CR or LF drops the connection and any
+//! partial message (CLAUDE.md, SMTP smuggling).
 
 #![forbid(unsafe_code)]
 
@@ -17,13 +18,34 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use smtp_proto::{ClientName, ForwardPath, ReversePath};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 
+mod auth;
+mod conn;
+mod inbound;
 pub mod maildir;
 mod session;
+mod submission;
+pub mod tls;
 
-/// Settings for an inbound listener.
+pub use auth::{Accounts, AuthLimits};
+pub use submission::DkimKeys;
+
+/// What a listener is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// Port 25: mail for local recipients from anyone; STARTTLS offered when
+    /// a certificate is configured; never AUTH.
+    Inbound,
+    /// Port 587: STARTTLS, then AUTH, then mail to anyone (RFC 6409).
+    Submission,
+    /// Port 465: TLS from the first byte, then AUTH (RFC 8314 §3.3).
+    SubmissionImplicitTls,
+}
+
+/// Settings for the SMTP listeners.
 #[derive(Debug, Clone)]
 pub struct InboundConfig {
     /// Our host name, used in the greeting, EHLO reply and Received header.
@@ -36,11 +58,47 @@ pub struct InboundConfig {
     pub message_size: u64,
     /// Maximum recipients per transaction.
     pub max_recipients: usize,
-    /// How long to wait for the client. RFC 5321 §4.5.3.2.7: at least
-    /// 5 minutes while awaiting a command.
-    pub idle_timeout: Duration,
+    /// How long to wait for a command. RFC 5321 §4.5.3.2.7: at least
+    /// 5 minutes.
+    pub command_timeout: Duration,
+    /// How long to wait for more message data before giving up.
+    pub data_timeout: Duration,
+    /// How long a TLS handshake may take.
+    pub tls_handshake_timeout: Duration,
+    /// Hard cap on a whole session, so slow clients can't hold
+    /// connections forever.
+    pub session_timeout: Duration,
     /// Simultaneous connections; more get 421 and are closed.
     pub max_connections: usize,
+    /// Run SPF, DKIM and DMARC on inbound mail (off in `--demo`).
+    pub inbound_checks: bool,
+    /// Test mode: submission accepts remote recipients only in these domains.
+    pub test_mode_allow: Option<Vec<String>>,
+    /// Brute-force limits for AUTH.
+    pub auth_limits: AuthLimits,
+}
+
+impl InboundConfig {
+    /// Defaults for `hostname`: 4 KiB commands, 64 KiB data lines, 25 MiB
+    /// messages, 100 recipients, 5-minute command and data timeouts,
+    /// 30-second TLS handshakes, 30-minute sessions.
+    pub fn new(hostname: &str) -> Self {
+        Self {
+            hostname: hostname.to_owned(),
+            command_line_cap: smtp_proto::limits::DEFAULT_COMMAND_LINE_CAP,
+            data_line_cap: smtp_proto::limits::DEFAULT_INBOUND_TEXT_LINE_CAP,
+            message_size: 25 * 1024 * 1024,
+            max_recipients: 100,
+            command_timeout: Duration::from_secs(300),
+            data_timeout: Duration::from_secs(300),
+            tls_handshake_timeout: Duration::from_secs(30),
+            session_timeout: Duration::from_secs(30 * 60),
+            max_connections: 100,
+            inbound_checks: true,
+            test_mode_allow: None,
+            auth_limits: AuthLimits::default(),
+        }
+    }
 }
 
 /// Where a recipient goes.
@@ -50,7 +108,7 @@ pub enum Recipient {
     Local(String),
     /// A local domain, but no such account.
     UnknownUser,
-    /// Not one of our domains. We never relay, so this is rejected.
+    /// Not one of our domains.
     NotLocal,
 }
 
@@ -58,6 +116,15 @@ pub enum Recipient {
 pub trait Directory: Send + Sync + 'static {
     /// Resolves a RCPT TO forward-path.
     fn resolve(&self, to: &ForwardPath) -> Recipient;
+}
+
+/// A recipient of an accepted message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Rcpt {
+    /// A local account.
+    Local(String),
+    /// A remote address (authenticated submission only): goes to the queue.
+    Remote(String),
 }
 
 /// A message accepted from a client, ready for delivery.
@@ -72,16 +139,21 @@ pub struct Envelope {
     pub client_name: ClientName,
     /// MAIL FROM.
     pub from: ReversePath,
-    /// Local accounts, deduplicated, in RCPT order.
-    pub recipients: Vec<String>,
+    /// Recipients, deduplicated, in RCPT order.
+    pub recipients: Vec<Rcpt>,
     /// Whether the client used SMTPUTF8.
     pub smtputf8: bool,
     /// Accepted protocol deviations, for the spam scorer.
     pub signals: Signals,
+    /// The authenticated account, for submissions.
+    pub authenticated: Option<String>,
+    /// Deliver local copies to the Junk folder (DMARC quarantine/permerror).
+    pub junk: bool,
 }
 
 /// Protocol deviations that policy accepts but records for spam scoring
-/// (CLAUDE.md, "lenient on harmless syntax"). Sticky for the session.
+/// (CLAUDE.md, "lenient on harmless syntax"). Sticky for the session, and
+/// reset by STARTTLS like all other session state.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Signals {
     /// The HELO/EHLO name did not match the RFC 5321 grammar.
@@ -94,7 +166,7 @@ pub struct Signals {
 pub trait Sink: Send + Sync + 'static {
     /// Stores `message` for every recipient. Must not return until the
     /// message is safely on disk: the client is told 250 afterwards
-    /// (RFC 5321 §6.1).
+    /// (RFC 5321 §6.1). An error of kind `StorageFull` gets 452 4.3.1.
     fn deliver(
         &self,
         envelope: &Envelope,
@@ -110,54 +182,174 @@ pub trait Sink: Send + Sync + 'static {
 
 /// Hooks for metrics.
 pub trait Observer: Send + Sync + 'static {
-    /// A bare CR or LF in message data: possible SMTP smuggling.
+    /// A bare CR or LF in a command or message data: possible smuggling.
     fn smuggling_attempt(&self, _client_ip: IpAddr) {}
     /// A message was accepted and stored.
     fn message_accepted(&self) {}
+    /// A failed AUTH attempt.
+    fn auth_failure(&self, _client_ip: IpAddr) {}
 }
 
-/// An inbound SMTP server.
+/// A resolver that never answers, for when inbound checks are off
+/// (`--demo`). It is never called in that case.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoDns;
+
+impl dns::Resolver for NoDns {
+    async fn mx(&self, _: &str) -> Result<dns::Answer<dns::Mx>, dns::Error> {
+        Err(dns::Error::Temporary("no resolver".into()))
+    }
+    async fn a(&self, _: &str) -> Result<dns::Answer<IpAddr>, dns::Error> {
+        Err(dns::Error::Temporary("no resolver".into()))
+    }
+    async fn aaaa(&self, _: &str) -> Result<dns::Answer<IpAddr>, dns::Error> {
+        Err(dns::Error::Temporary("no resolver".into()))
+    }
+    async fn txt(&self, _: &str) -> Result<dns::Answer<Vec<u8>>, dns::Error> {
+        Err(dns::Error::Temporary("no resolver".into()))
+    }
+    async fn tlsa(&self, _: &str) -> Result<dns::Answer<dns::Tlsa>, dns::Error> {
+        Err(dns::Error::Temporary("no resolver".into()))
+    }
+    async fn ptr(&self, _: IpAddr) -> Result<dns::Answer<String>, dns::Error> {
+        Err(dns::Error::Temporary("no resolver".into()))
+    }
+}
+
+/// The production sink: local recipients to Maildir, remote recipients to
+/// the outbound queue.
 #[derive(Debug)]
-pub struct Server<D, K, O> {
+pub struct Delivery {
+    pub maildir: maildir::Maildir,
+    pub queue: Arc<queue::Queue>,
+}
+
+impl Sink for Delivery {
+    async fn deliver(&self, envelope: &Envelope, message: &[u8]) -> std::io::Result<()> {
+        let remote: Vec<String> = envelope
+            .recipients
+            .iter()
+            .filter_map(|r| match r {
+                Rcpt::Remote(a) => Some(a.clone()),
+                Rcpt::Local(_) => None,
+            })
+            .collect();
+        if !remote.is_empty() {
+            let sender = match &envelope.from {
+                ReversePath::Null => None,
+                ReversePath::Mailbox(m) => Some(m.to_string()),
+            };
+            let queue = self.queue.clone();
+            let msg = message.to_vec();
+            let result = tokio::task::spawn_blocking(move || {
+                queue.enqueue(sender.as_deref(), &remote, &msg)
+            })
+            .await
+            .map_err(std::io::Error::other)?;
+            match result {
+                Ok(_) => {}
+                Err(queue::QueueError::NoSpace) => {
+                    return Err(std::io::ErrorKind::StorageFull.into());
+                }
+                Err(e) => return Err(std::io::Error::other(e.to_string())),
+            }
+        }
+        if envelope
+            .recipients
+            .iter()
+            .any(|r| matches!(r, Rcpt::Local(_)))
+        {
+            self.maildir.deliver(envelope, message).await?;
+        }
+        Ok(())
+    }
+
+    fn has_space(&self) -> bool {
+        self.maildir.has_space() && self.queue.has_space()
+    }
+}
+
+/// The SMTP server.
+pub struct Server<D, K, O, R> {
     config: InboundConfig,
     directory: D,
     sink: K,
     observer: O,
+    resolver: R,
+    tls: Option<Arc<rustls::ServerConfig>>,
+    accounts: Option<Arc<dyn Accounts>>,
+    dkim: Option<Arc<DkimKeys>>,
+    guard: auth::Guard,
     connections: Semaphore,
 }
 
-impl<D: Directory, K: Sink, O: Observer> Server<D, K, O> {
-    /// Creates a server.
-    pub fn new(config: InboundConfig, directory: D, sink: K, observer: O) -> Arc<Self> {
+impl<D, K, O, R> std::fmt::Debug for Server<D, K, O, R> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Server")
+            .field("config", &self.config)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<D: Directory, K: Sink, O: Observer, R: dns::Resolver + 'static> Server<D, K, O, R> {
+    /// A server without TLS, AUTH or DKIM; add them with the `with_*`
+    /// methods, then call [`Server::shared`].
+    pub fn new(config: InboundConfig, directory: D, sink: K, observer: O, resolver: R) -> Self {
         let connections = Semaphore::new(config.max_connections);
-        Arc::new(Self {
+        let guard = auth::Guard::new(config.auth_limits.clone());
+        Self {
             config,
             directory,
             sink,
             observer,
+            resolver,
+            tls: None,
+            accounts: None,
+            dkim: None,
+            guard,
             connections,
-        })
+        }
     }
 
-    /// Accepts connections on `listener` until it fails.
-    pub async fn run(self: Arc<Self>, listener: TcpListener) -> std::io::Result<()> {
+    /// Enables STARTTLS and implicit TLS with this certificate.
+    pub fn with_tls(mut self, tls: Arc<rustls::ServerConfig>) -> Self {
+        self.tls = Some(tls);
+        self
+    }
+
+    /// Enables AUTH (submission only) against these accounts.
+    pub fn with_accounts(mut self, accounts: Arc<dyn Accounts>) -> Self {
+        self.accounts = Some(accounts);
+        self
+    }
+
+    /// DKIM keys for signing submitted mail.
+    pub fn with_dkim(mut self, keys: Arc<DkimKeys>) -> Self {
+        self.dkim = Some(keys);
+        self
+    }
+
+    /// Wraps the server for sharing between listeners.
+    pub fn shared(self) -> Arc<Self> {
+        Arc::new(self)
+    }
+
+    /// Accepts connections on `listener` in `mode` until it fails.
+    pub async fn run(self: Arc<Self>, listener: TcpListener, mode: Mode) -> std::io::Result<()> {
         loop {
             let (stream, peer) = listener.accept().await?;
             let server = self.clone();
-            tokio::spawn(async move {
-                let permit = server.connections.try_acquire();
-                session::run(&server, stream, peer.ip(), permit.is_ok()).await;
-            });
+            tokio::spawn(async move { server.handle(stream, peer.ip(), mode).await });
         }
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn recipient_variants_are_distinct() {
-        assert_ne!(Recipient::UnknownUser, Recipient::NotLocal);
+    /// Runs one session over any byte stream (also used by tests and the
+    /// fuzzer, over in-memory streams).
+    pub async fn handle<S>(self: &Arc<Self>, stream: S, client_ip: IpAddr, mode: Mode)
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send,
+    {
+        let permit = self.connections.try_acquire();
+        session::run(self, stream, client_ip, mode, permit.is_ok()).await;
     }
 }

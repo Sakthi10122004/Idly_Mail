@@ -26,13 +26,31 @@ inbound_line = 65536        # octets per DATA line (RFC minimum: 1000)
 message_size = 26214400     # 25 MiB, announced with SIZE
 max_recipients = 100        # per message (RFC minimum: 100)
 min_free_space = 1073741824 # refuse new mail (452 4.3.1) below 1 GiB free
+command_timeout = 300       # seconds waiting for a command (RFC minimum: 300)
+data_timeout = 300          # seconds waiting for message data
+tls_handshake_timeout = 30  # seconds
+session_timeout = 1800      # hard cap on one SMTP session, seconds
+max_connections = 100       # simultaneous SMTP connections
+
+# TLS certificate for STARTTLS (25, 587) and implicit TLS (465), PEM files.
+# Without it, port 25 runs without STARTTLS and 587/465 are not started,
+# because AUTH is never offered without TLS. ACME arrives in milestone 8.
+[tls]
+cert_file = "/etc/idly/tls/fullchain.pem"
+key_file = "/etc/idly/tls/privkey.pem"
 
 # Domains this server handles. Repeat the block for each domain.
 [[domain]]
 name = "example.org"
 
-# Accounts that may send mail through submission (587/465).
-# Generate the hash with:  idly user hash-password
+# Accounts that may send mail through submission (587/465). An account may
+# only send as its own address (MAIL FROM and the From header).
+# Generate the hash with:  read -rs P; printf %s "$P" | idly user hash-password
+#
+# DKIM keys live in <data_dir>/dkim/<domain>/<selector>.key; create them with
+#   idly dkim generate --domain example.org --selector 2026
+# (an RSA and an Ed25519 key, so mail is dual-signed) and publish the TXT
+# records it prints.
 [[account]]
 address = "alice@example.org"
 password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$REPLACEMEREPLACEMEREPLACEMEREPLACEME"

@@ -22,7 +22,7 @@ pub(crate) struct ConfigDirectory {
 /// The lookup key for a mailbox: ASCII-lower-cased local-part (local-parts
 /// are compared case-insensitively here, as nearly every server does) and
 /// the A-label domain.
-fn key(m: &Mailbox) -> Option<String> {
+pub(crate) fn key(m: &Mailbox) -> Option<String> {
     match &m.host {
         Host::Domain(d) => Some(format!(
             "{}@{}",
@@ -106,10 +106,10 @@ mod tests {
             name = "bücher.example"
             [[account]]
             address = "Alice@example.org"
-            password_hash = "$argon2id$x"
+            password_hash = "$argon2id$v=19$m=19456,t=2,p=1$ZGVtb2RlbW9kZW1v$ZGVtby1vbmx5LW5vdC1hLXJlYWwtaGFzaA"
             [[account]]
             address = "kim@bücher.example"
-            password_hash = "$argon2id$x"
+            password_hash = "$argon2id$v=19$m=19456,t=2,p=1$ZGVtb2RlbW9kZW1v$ZGVtby1vbmx5LW5vdC1hLXJlYWwtaGFzaA"
         "#,
         )
         .unwrap();

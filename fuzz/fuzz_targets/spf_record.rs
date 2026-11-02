@@ -11,7 +11,9 @@ use mail_auth_glue::spf::record::Record;
 use mail_auth_glue::spf::{SpfResult, check_host};
 
 fuzz_target!(|data: &[u8]| {
-    let Ok(text) = core::str::from_utf8(data) else { return };
+    let Ok(text) = core::str::from_utf8(data) else {
+        return;
+    };
     let _ = Record::parse(text);
     let ip = |s: &str| s.parse().expect("ip");
     let resolver = StaticResolver::new()
@@ -23,9 +25,18 @@ fuzz_target!(|data: &[u8]| {
         .with_ip("example.com", ip("192.0.2.2"))
         .with_ptr(ip("192.0.2.3"), "host.example.com")
         .with_ip("host.example.com", ip("192.0.2.3"));
-    let rt = tokio::runtime::Builder::new_current_thread().enable_time().build().expect("runtime");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .expect("runtime");
     for client in ["192.0.2.3", "2001:db8::1"] {
-        let r = rt.block_on(check_host(&resolver, ip(client), "example.com", "user+tag@example.com", "helo.example.net"));
+        let r = rt.block_on(check_host(
+            &resolver,
+            ip(client),
+            "example.com",
+            "user+tag@example.com",
+            "helo.example.net",
+        ));
         // A loop must end in a limit, never hang or overflow the stack.
         let _ = r == SpfResult::Pass;
     }

@@ -24,6 +24,8 @@ pub(crate) struct Config {
     #[serde(default, rename = "account")]
     pub(crate) accounts: Vec<Account>,
     #[serde(default)]
+    pub(crate) tls: Option<Tls>,
+    #[serde(default)]
     pub(crate) test_mode: TestMode,
     #[serde(default)]
     pub(crate) log: Log,
@@ -49,11 +51,9 @@ pub(crate) struct Listen {
     #[serde(default = "default_smtp")]
     pub(crate) smtp: Vec<SocketAddr>,
     /// Submission with STARTTLS (port 587).
-    #[allow(dead_code)] // submission listeners arrive in milestone 6
     #[serde(default = "default_submission")]
     pub(crate) submission: Vec<SocketAddr>,
     /// Submission with implicit TLS (port 465).
-    #[allow(dead_code)] // submission listeners arrive in milestone 6
     #[serde(default = "default_submissions")]
     pub(crate) submissions: Vec<SocketAddr>,
     /// Prometheus metrics endpoint; omit to disable.
@@ -107,6 +107,21 @@ pub(crate) struct Limits {
     /// has fewer free bytes than this.
     #[serde(default = "default_min_free_space")]
     pub(crate) min_free_space: u64,
+    /// Seconds to wait for the next command (RFC 5321 §4.5.3.2.7).
+    #[serde(default = "default_command_timeout")]
+    pub(crate) command_timeout: u64,
+    /// Seconds to wait for more message data.
+    #[serde(default = "default_data_timeout")]
+    pub(crate) data_timeout: u64,
+    /// Seconds a TLS handshake may take.
+    #[serde(default = "default_tls_handshake_timeout")]
+    pub(crate) tls_handshake_timeout: u64,
+    /// Seconds a whole SMTP session may last.
+    #[serde(default = "default_session_timeout")]
+    pub(crate) session_timeout: u64,
+    /// Simultaneous SMTP connections over all listeners.
+    #[serde(default = "default_max_connections")]
+    pub(crate) max_connections: usize,
 }
 
 impl Default for Limits {
@@ -117,6 +132,11 @@ impl Default for Limits {
             message_size: default_message_size(),
             max_recipients: default_max_recipients(),
             min_free_space: default_min_free_space(),
+            command_timeout: default_command_timeout(),
+            data_timeout: default_data_timeout(),
+            tls_handshake_timeout: default_tls_handshake_timeout(),
+            session_timeout: default_session_timeout(),
+            max_connections: default_max_connections(),
         }
     }
 }
@@ -135,6 +155,31 @@ fn default_max_recipients() -> usize {
 }
 fn default_min_free_space() -> u64 {
     1024 * 1024 * 1024
+}
+fn default_command_timeout() -> u64 {
+    300
+}
+fn default_data_timeout() -> u64 {
+    300
+}
+fn default_tls_handshake_timeout() -> u64 {
+    30
+}
+fn default_session_timeout() -> u64 {
+    30 * 60
+}
+fn default_max_connections() -> usize {
+    100
+}
+
+/// The TLS certificate for STARTTLS and port 465 (until ACME, milestone 8).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Tls {
+    /// PEM certificate chain, leaf first.
+    pub(crate) cert_file: PathBuf,
+    /// PEM private key (PKCS #8, PKCS #1 or SEC1).
+    pub(crate) key_file: PathBuf,
 }
 
 /// A domain this server receives and sends mail for.
@@ -323,7 +368,9 @@ impl Config {
                 }
                 Err(_) => bad(format!("account[{i}].address"), "not a valid email address"),
             }
-            if !a.password_hash.starts_with("$argon2id$") {
+            if !a.password_hash.starts_with("$argon2id$")
+                || argon2::password_hash::phc::PasswordHash::new(&a.password_hash).is_err()
+            {
                 bad(
                     format!("account[{i}].password_hash"),
                     "must be an Argon2id PHC string ($argon2id$...); generate one with `idly user hash-password`",
@@ -353,6 +400,44 @@ impl Config {
         // RFC 5321 §4.5.3.1.8: at least 100 recipients must be buffered.
         if l.max_recipients < 100 {
             bad("limits.max_recipients".into(), "must be at least 100");
+        }
+        // RFC 5321 §4.5.3.2.7: the server should wait at least 5 minutes.
+        if l.command_timeout < 300 {
+            bad(
+                "limits.command_timeout".into(),
+                "must be at least 300 seconds",
+            );
+        }
+        // RFC 5321 §4.5.3.2.6: clients wait 10 minutes after DATA ends, and
+        // send blocks within 3 minutes (§4.5.3.2.5).
+        if l.data_timeout < 180 {
+            bad("limits.data_timeout".into(), "must be at least 180 seconds");
+        }
+        if !(5..=300).contains(&l.tls_handshake_timeout) {
+            bad(
+                "limits.tls_handshake_timeout".into(),
+                "must be between 5 and 300 seconds",
+            );
+        }
+        if l.session_timeout < l.command_timeout.max(l.data_timeout) {
+            bad(
+                "limits.session_timeout".into(),
+                "must be at least the command and data timeouts",
+            );
+        }
+        if l.max_connections == 0 {
+            bad("limits.max_connections".into(), "must be at least 1");
+        }
+
+        if let Some(tls) = &self.tls {
+            for (key, path) in [
+                ("tls.cert_file", &tls.cert_file),
+                ("tls.key_file", &tls.key_file),
+            ] {
+                if !path.is_absolute() {
+                    bad(key.into(), "must be an absolute path");
+                }
+            }
         }
 
         if self.test_mode.enabled && self.test_mode.allow_domains.is_empty() {
@@ -439,7 +524,7 @@ mod tests {
 
         [[account]]
         address = "alice@example.org"
-        password_hash = "$argon2id$x"
+        password_hash = "$argon2id$v=19$m=19456,t=2,p=1$ZGVtb2RlbW9kZW1v$ZGVtby1vbmx5LW5vdC1hLXJlYWwtaGFzaA"
     "#;
 
     fn problems(text: &str) -> Vec<String> {

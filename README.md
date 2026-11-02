@@ -5,9 +5,11 @@ sends, receives, stores and serves email for one or more domains. It is built
 to run on a 1 GB VPS with embedded storage, and the same binary is designed to
 scale out to a cluster later.
 
-> **Status:** Phase 1 in progress. Idly can receive mail in a local,
-> receive-only demo (see [Try it locally](#try-it-locally)); it cannot send
-> mail yet. See [Roadmap](#roadmap).
+> **Status:** Phase 1 in progress. Idly receives mail (with TLS and
+> SPF/DKIM/DMARC checks) and accepts authenticated submissions, which it
+> DKIM-signs and queues; it cannot deliver to other servers yet. A local,
+> receive-only demo is in [Try it locally](#try-it-locally). See
+> [Roadmap](#roadmap).
 
 ## The no-relay principle
 
@@ -77,7 +79,7 @@ A receive-only demo runs on your own machine. It only listens on 127.0.0.1
 (it refuses any other address), it has no outbound delivery at all, and it
 writes every accepted message to a Maildir folder. It applies the same
 strict SMTP rules as the real server, including the bare-CR/LF rejection.
-It does not yet do TLS, logins or SPF/DKIM/DMARC checks.
+The demo deliberately leaves out TLS, logins and SPF/DKIM/DMARC checks.
 
 ```sh
 cargo build --release

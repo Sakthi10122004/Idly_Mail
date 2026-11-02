@@ -13,11 +13,20 @@ publish.workspace = true
 [dependencies]
 smtp-proto.workspace = true
 queue.workspace = true
+dns.workspace = true
+mail-auth-glue.workspace = true
+rustls.workspace = true
+tokio-rustls.workspace = true
+rustls-pki-types.workspace = true
+base64.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+rcgen.workspace = true
+dns = { workspace = true, features = ["testing"] }
+argon2.workspace = true
 
 [lints]
 workspace = true

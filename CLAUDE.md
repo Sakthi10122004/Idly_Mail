@@ -148,6 +148,12 @@ first, before any decision below.
    folder, log at info naming the reason. Do not reject.
 3. **DMARC fail** (after any `t=y` downgrade): `p=reject` -> `550 5.7.1` at
    the end of DATA; `p=quarantine` -> Junk; `p=none` -> deliver normally.
+4. **SPF fail alone NEVER rejects** (maintainer decision, milestone 6):
+   forwarding breaks SPF, so DMARC decides. The SPF result stays in
+   Authentication-Results as a signal for the Phase 3 scorer.
+5. **Authenticated submissions skip inbound DMARC rejection**: mail from a
+   logged-in account is checked by sender authorization (MAIL FROM and
+   From must be the account's), not by SPF/DKIM/DMARC.
 
 ## RFC citations
 

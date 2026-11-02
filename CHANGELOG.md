@@ -95,7 +95,7 @@ grouped by development phase (see the roadmap in [README.md](README.md)).
   - Strict CRLF-only framing.
   - Configurable limits: command-line length (default 4 KiB), message line
     length (default 64 KiB), message size and recipient count.
-  - Pipelining, an idle timeout and a connection limit.
+  - Pipelining, timeouts and a connection limit.
   - Accepts mail only for local accounts and never relays (`550 5.7.1`).
     Mail to `postmaster` is always accepted.
   - SMTPUTF8 and internationalized addresses.
@@ -119,6 +119,48 @@ grouped by development phase (see the roadmap in [README.md](README.md)).
   - It distinguishes "domain does not exist", "no records of this type",
     "failed validation" and "temporary failure".
 
+- **TLS** for SMTP (rustls with `ring`; TLS 1.3 and 1.2; no OpenSSL):
+  STARTTLS on ports 25 and 587 and implicit TLS on port 465 (RFC 8314).
+  The certificate comes from PEM files in the new `[tls]` section until
+  ACME arrives. Without `[tls]`, port 25 runs without STARTTLS and the
+  submission ports are not started.
+- **Mail submission** on 587 and 465 (RFC 6409) with `AUTH PLAIN` and
+  `AUTH LOGIN` (RFC 4954), checked against the Argon2id hashes in
+  `[[account]]`:
+  - An account may send only as its own address: both `MAIL FROM` and
+    every address in the From header must be its own, otherwise
+    `553 5.7.1 sender not owned by user`.
+  - Lines over 998 octets are re-encoded as quoted-printable (or long
+    base64 is re-wrapped) before signing, so Idly never sends a
+    non-compliant message.
+  - `Date` and `Message-ID` are added when missing.
+  - Every DKIM key of the From domain signs, so mail is dual-signed with
+    RSA and Ed25519.
+  - Local recipients go straight to Maildir; remote recipients go to the
+    outbound queue. Outbound delivery itself arrives in the next milestone,
+    so until then remote mail waits in the queue.
+  - In test mode, remote recipients outside the allow-list are refused
+    with `550 5.7.1` at RCPT time.
+- **Inbound SPF, DKIM and DMARC checks** on port 25, with our
+  Authentication-Results header added after any forged ones are removed:
+  - DMARC `p=reject` gives `550 5.7.1` at the end of DATA;
+    `p=quarantine` and DMARC `permerror` go to the recipient's Junk folder
+    (Maildir++ `.Junk`).
+  - DNS trouble (`temperror`) never rejects or delays mail: it is
+    delivered and the result recorded.
+  - An SPF fail alone never rejects; DMARC decides, and the SPF result is
+    kept for spam scoring.
+- **New settings** in `[limits]`: `command_timeout`, `data_timeout`,
+  `tls_handshake_timeout` (default 30 s), `session_timeout` (default
+  30 min) and `max_connections`.
+- **Commands:** `idly user hash-password` (reads the password from
+  standard input) and `idly dkim generate --domain D --selector S`, which
+  writes RSA and Ed25519 keys under `<data_dir>/dkim/` (mode 0600) and
+  prints the TXT records to publish.
+- **Metric** `idly_auth_failures_total`.
+- **Fuzz targets** `mime_fix` (the long-line re-encoder) and
+  `smtp_session`, which feeds arbitrary bytes into whole server sessions
+  over plaintext, STARTTLS, implicit TLS and authenticated submission.
 #### Changed
 - **Paths without angle brackets are accepted** (`MAIL FROM:user@example.com`,
   with or without a space after the colon), parsed as if bracketed. The
@@ -168,6 +210,30 @@ grouped by development phase (see the roadmap in [README.md](README.md)).
   `reason="smuggling-attempt"` and counted in
   `idly_smuggling_attempts_total`. It used to be logged only as a bad
   command line.
+- **STARTTLS command injection is blocked** (the CVE-2011-0411 class).
+  If a client sends anything after `STARTTLS` before the TLS handshake,
+  Idly replies `554 5.5.1` and closes the connection without running it.
+- **TLS resets the session** (RFC 3207 §4.2): the client name, any open
+  transaction, authentication and spam signals are all discarded, and
+  EHLO is required again.
+- **Timeouts:** the TLS handshake (30 s), each command and each wait for
+  message data (5 minutes, RFC 5321 §4.5.3.2.7), and a hard cap on a
+  whole session (30 minutes, then `421 4.4.2`).
+- **AUTH is never offered or accepted without TLS** (`538 5.7.11`), and
+  never on port 25.
+- **Password guessing is slowed down and stopped:**
+  - After a few failures, each further failure from the same IP or for
+    the same account waits longer (doubling, up to 30 s).
+  - After 20 failures in 15 minutes an IP is refused outright
+    (`421 4.7.0`), without checking any password.
+  - A session is closed after 3 failed attempts.
+  - At most 2 Argon2 checks run at once, so a flood of logins can't
+    exhaust the CPU or memory.
+  - A wrong user name and a wrong password get the same reply and take
+    the same time (an unknown user is checked against a dummy hash).
+  - Failures are logged with the IP and user name, never the password.
+- **Forged Authentication-Results fields are removed** from inbound mail
+  before Idly adds its own (RFC 8601 §5).
 - **`hickory-recursor` is banned.** It has a cache-poisoning advisory,
   RUSTSEC-2026-0106, with no fixed release.
 

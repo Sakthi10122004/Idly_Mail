@@ -32,7 +32,9 @@ fuzz_target!(|data: &[u8]| {
     let _ = Signature::parse(data);
     let _ = KeyRecord::parse(data, "rsa");
     let _ = KeyRecord::parse(data, "ed25519");
-    let rt = tokio::runtime::Builder::new_current_thread().build().expect("runtime");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("runtime");
     let results = rt.block_on(verify(resolver(), data, 1_528_637_969));
     assert!(results.len() <= 8);
 });

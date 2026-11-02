@@ -16,7 +16,9 @@ use std::time::Duration;
 
 use smtp_proto::{ForwardPath, Host, Reply};
 use smtp_server::maildir::Maildir;
-use smtp_server::{Directory, Envelope, InboundConfig, Observer, Recipient, Server, Sink};
+use smtp_server::{
+    Directory, Envelope, InboundConfig, Mode, NoDns, Observer, Recipient, Server, Sink,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -86,15 +88,12 @@ struct Harness {
 }
 
 fn config() -> InboundConfig {
-    InboundConfig {
-        hostname: "mx.example.org".into(),
-        command_line_cap: 4096,
-        data_line_cap: 65536,
-        message_size: 100_000,
-        max_recipients: 100,
-        idle_timeout: Duration::from_secs(300),
-        max_connections: 10,
-    }
+    let mut c = InboundConfig::new("mx.example.org");
+    c.message_size = 100_000;
+    c.max_connections = 10;
+    // These tests cover the SMTP layer; authentication checks have their own.
+    c.inbound_checks = false;
+    c
 }
 
 async fn start(config: InboundConfig) -> Harness {
@@ -112,10 +111,17 @@ async fn start_with_floor(config: InboundConfig, min_free: u64) -> Harness {
             .with_min_free_space(min_free, Arc::new(queue::space::Statvfs)),
         envelopes: envelopes.clone(),
     };
-    let server = Server::new(config, TestDirectory, sink, TestObserver(counts.clone()));
+    let server = Server::new(
+        config,
+        TestDirectory,
+        sink,
+        TestObserver(counts.clone()),
+        NoDns,
+    )
+    .shared();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    tokio::spawn(server.run(listener));
+    tokio::spawn(server.run(listener, Mode::Inbound));
     Harness {
         addr,
         root,

@@ -12,13 +12,20 @@ use mail_auth_glue::spf::SpfResult;
 
 fuzz_target!(|data: &[u8]| {
     let _ = Record::parse(data);
-    let Ok(text) = core::str::from_utf8(data) else { return };
+    let Ok(text) = core::str::from_utf8(data) else {
+        return;
+    };
     let resolver = StaticResolver::new()
         .with_txt("_dmarc.example.com", text)
         .with_txt("_dmarc.com", "v=DMARC1; p=none; psd=y")
         .with_ip("child.example.com", "192.0.2.1".parse().expect("ip"));
-    let rt = tokio::runtime::Builder::new_current_thread().build().expect("runtime");
-    let inputs = Inputs { spf: (SpfResult::Pass, "child.example.com"), dkim: &[] };
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("runtime");
+    let inputs = Inputs {
+        spf: (SpfResult::Pass, "child.example.com"),
+        dkim: &[],
+    };
     let msg = b"From: a@sub.child.example.com\r\n\r\nx\r\n";
     let _ = rt.block_on(evaluate(&resolver, msg, &inputs));
     // The input as a From field value.

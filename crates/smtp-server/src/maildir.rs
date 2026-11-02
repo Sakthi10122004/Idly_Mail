@@ -11,7 +11,7 @@ use tokio::io::AsyncWriteExt;
 
 use queue::space::{self, SpaceProbe, Statvfs};
 
-use crate::{Envelope, Sink};
+use crate::{Envelope, Rcpt, Sink};
 
 /// Delivers into `<root>/<account>/{tmp,new,cur}`.
 pub struct Maildir {
@@ -75,10 +75,16 @@ impl Maildir {
     async fn deliver_one(
         &self,
         account: &str,
+        junk: bool,
         headers: &[u8],
         message: &[u8],
     ) -> std::io::Result<PathBuf> {
-        let dir = self.account_dir(account);
+        // Junk goes to the Maildir++ ".Junk" folder inside the account.
+        let dir = if junk {
+            self.account_dir(account).join(".Junk")
+        } else {
+            self.account_dir(account)
+        };
         for sub in ["tmp", "new", "cur"] {
             tokio::fs::create_dir_all(dir.join(sub)).await?;
         }
@@ -139,12 +145,24 @@ impl Sink for Maildir {
     async fn deliver(&self, envelope: &Envelope, message: &[u8]) -> std::io::Result<()> {
         // RFC 5321 §4.4: the delivery server adds Return-Path at final delivery.
         let mut done = Vec::new();
-        for account in &envelope.recipients {
+        for rcpt in &envelope.recipients {
+            let account = match rcpt {
+                Rcpt::Local(a) => a,
+                // Remote recipients belong to the queue, never to Maildir.
+                Rcpt::Remote(_) => {
+                    return Err(std::io::Error::other(
+                        "remote recipient given to the Maildir sink",
+                    ));
+                }
+            };
             let headers = format!(
                 "Return-Path: {}\r\nDelivered-To: {account}\r\n",
                 envelope.from
             );
-            match self.deliver_one(account, headers.as_bytes(), message).await {
+            match self
+                .deliver_one(account, envelope.junk, headers.as_bytes(), message)
+                .await
+            {
                 Ok(p) => done.push(p),
                 Err(e) => {
                     // All or nothing: the client will retry after a 4xx.
