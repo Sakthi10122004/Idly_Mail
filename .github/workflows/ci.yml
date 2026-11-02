@@ -91,7 +91,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [command_parse, reply_parse, data_decode, roundtrip, message_parse, dkim_verify, spf_record, dmarc_record, auth_results, mime_fix, smtp_session, smtp_session_plain, mta_sts, smtp_client_session, tlsrpt]
+        target: [command_parse, reply_parse, data_decode, roundtrip, message_parse, dkim_verify, spf_record, dmarc_record, auth_results, mime_fix, smtp_session, smtp_session_plain, mta_sts, smtp_client_session, tlsrpt, cert_inspect]
     env:
       RUSTFLAGS: ""
     steps:

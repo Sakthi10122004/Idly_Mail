@@ -15,9 +15,12 @@ smtp-server.workspace = true
 smtp-client.workspace = true
 queue.workspace = true
 dns.workspace = true
+acme.workspace = true
+ring.workspace = true
 mail-auth-glue.workspace = true
 argon2.workspace = true
 rustls.workspace = true
+tokio-rustls.workspace = true
 rustls-pki-types.workspace = true
 serde.workspace = true
 toml.workspace = true
@@ -31,6 +34,7 @@ http-body-util.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+rcgen.workspace = true
 dns = { workspace = true, features = ["testing"] }
 
 [lints]

@@ -211,6 +211,31 @@ grouped by development phase (see the roadmap in [README.md](README.md)).
     have a DKIM key (`allow_unsigned` doesn't apply); otherwise
     `check-config` and `serve` refuse to start.
 - **Fuzz target** `tlsrpt` (the `_smtp._tls` record and its URIs).
+- **Automatic TLS certificates (ACME, RFC 8555)**, new `acme` crate and
+  `[acme]` section:
+  - One certificate for `server.hostname` and, with MTA-STS on,
+    `mta-sts.<domain>` for every domain. HTTP-01 challenges are answered
+    by a built-in port-80 server; nothing else is served there.
+  - Renewed when two thirds of the lifetime has passed (30 days left for
+    a 90-day certificate), or at once when a name is added. Failures are
+    retried after 1, 2, 4, ... hours, at most a day apart.
+  - The key (`<data_dir>/acme/tls.key`, ECDSA P-256, mode 0600) is kept
+    across renewals, so a DANE `3 1 1` TLSA record stays valid. The
+    account is stored per CA directory.
+  - New certificates take effect at the next TLS handshake; no restart.
+    Until the first one arrives, a self-signed certificate is served.
+  - `directory` accepts `letsencrypt` (default), `letsencrypt-staging` or
+    any `https://` URL. `accept_terms = true` is required.
+- **`[tls]` certificate files are reloaded when they change** (checked
+  every 5 minutes), so a certbot renewal needs no restart. A broken new
+  pair is logged and the old certificate stays in use.
+- **MTA-STS policy hosting (RFC 8461)**, new `[mta_sts]` section: serves
+  `https://mta-sts.<domain>/.well-known/mta-sts.txt` for every domain on
+  port 443, with mode `testing` (default), `enforce` or `none` and a
+  configurable `max_age`. The policy id for the `_mta-sts` TXT record is
+  printed at startup and changes whenever the policy does.
+- **Metric** `idly_tls_certificate_expiry_timestamp_seconds`.
+- **Fuzz target** `cert_inspect` (reading certificate chains).
 - **`server.outbound_ips`**: the addresses outbound mail is sent from, at
   most one IPv4 and one IPv6. At startup, each must be assigned to the
   server and have a PTR record naming `server.hostname` that resolves
@@ -271,6 +296,16 @@ grouped by development phase (see the roadmap in [README.md](README.md)).
   decide the result; unused signatures are ignored.
 
 #### Security
+- **ACME traffic uses our own resolver and the outbound address guard**,
+  like SMTP: the CA's URLs must be `https://`, certificates are checked
+  against the system roots, and a CA name resolving to a private address
+  is never contacted. An issued certificate is used only if it is for our
+  key and covers every requested name.
+- **The port-80 and port-443 web servers are minimal:** each answers one
+  path (ACME challenge tokens, MTA-STS policies by host name) and 404 for
+  everything else, with at most 256 connections each, a 10-second limit
+  for the request header and TLS handshake, and 60 seconds per
+  connection.
 - **TLS report destinations are restricted.** HTTPS uploads go only to a
   DNS name on port 443 (no address literals, other ports or user info),
   through the same address guard as SMTP, with the certificate always

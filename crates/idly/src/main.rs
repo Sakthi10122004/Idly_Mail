@@ -11,10 +11,12 @@ use std::time::Duration;
 use clap::{Parser, Subcommand};
 
 mod accounts;
+mod certificates;
 mod config;
 mod directory;
 mod dkim;
 mod metrics;
+mod mta_sts;
 mod outbound;
 mod tlsrpt;
 
@@ -311,19 +313,25 @@ async fn start(config: &Config, metrics: Arc<metrics::Metrics>) -> std::io::Resu
         |what: &str, e: &dyn std::fmt::Display| std::io::Error::other(format!("{what}: {e}"));
     let data = &config.server.data_dir;
     let hostname = &config.server.hostname;
-    let tls = match &config.tls {
-        Some(t) => {
-            let cert = std::fs::read(&t.cert_file)
-                .map_err(|e| other(&t.cert_file.display().to_string(), &e))?;
-            let key = std::fs::read(&t.key_file)
-                .map_err(|e| other(&t.key_file.display().to_string(), &e))?;
-            Some(smtp_server::tls::server_config(&cert, &key).map_err(|e| other("TLS", &e))?)
+    let resolver = dns::Recursive::new().map_err(|e| other("DNS resolver", &e))?;
+    // MTA-STS and ACME need the system's trusted CAs (webpki-roots is banned).
+    let roots = Arc::new(smtp_client::system_roots().map_err(|e| other("TLS roots", &e))?);
+    let (families, sources) = outbound::families_and_sources(config);
+    // The certificate: [tls] files or ACME. ACME traffic uses our resolver
+    // and the outbound address guard, like everything else.
+    let https = smtp_client::Https::new(
+        resolver.clone(),
+        smtp_client::Direct,
+        roots.clone(),
+        families,
+        sources,
+    );
+    let tls = match certificates::start(config, &metrics, https).await? {
+        Some(certs) => {
+            Some(smtp_server::tls::server_config_with(certs).map_err(|e| other("TLS", &e))?)
         }
         None => None,
     };
-    let resolver = dns::Recursive::new().map_err(|e| other("DNS resolver", &e))?;
-    // MTA-STS needs the system's trusted CAs (webpki-roots is banned).
-    let roots = smtp_client::system_roots().map_err(|e| other("TLS roots", &e))?;
     outbound::check(config, &resolver)
         .await
         .map_err(|e| other("server.outbound_ips", &e))?;
@@ -359,8 +367,7 @@ async fn start(config: &Config, metrics: Arc<metrics::Metrics>) -> std::io::Resu
     );
 
     // Outbound: direct to each domain's MX, never through a relay.
-    let (families, sources) = outbound::families_and_sources(config);
-    let mut client_config = smtp_client::ClientConfig::new(hostname, Arc::new(roots));
+    let mut client_config = smtp_client::ClientConfig::new(hostname, roots);
     client_config.families = families;
     client_config.sources = sources;
     client_config.test_mode_allow = test_mode_allow.clone();
@@ -414,7 +421,7 @@ async fn start(config: &Config, metrics: Arc<metrics::Metrics>) -> std::io::Resu
         listen_config,
         directory::ConfigDirectory::new(config),
         sink,
-        metrics::MetricsObserver(metrics),
+        metrics::MetricsObserver(metrics.clone()),
         resolver,
     )
     .with_accounts(Arc::new(accounts))
@@ -436,7 +443,7 @@ async fn start(config: &Config, metrics: Arc<metrics::Metrics>) -> std::io::Resu
     } else {
         // AUTH is never offered without TLS, so submission would be useless.
         tracing::warn!(
-            "no [tls] certificate: port 25 runs without STARTTLS and the submission ports are not started"
+            "no [tls] or [acme] certificate: port 25 runs without STARTTLS and the submission ports are not started"
         );
     }
     Ok(())

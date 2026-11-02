@@ -17,6 +17,7 @@ smtp-server = { path = "crates/smtp-server" }
 mail-auth-glue = { path = "crates/mail-auth-glue" }
 queue = { path = "crates/queue" }
 smtp-client = { path = "crates/smtp-client" }
+acme = { path = "crates/acme" }
 rustls = { version = "0.23", default-features = false, features = ["ring", "tls12", "std", "logging"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 rustls-pki-types = { version = "1", features = ["std"] }
@@ -30,6 +31,12 @@ base64 = { version = "0.23", default-features = false, features = ["std"] }
 serde_json = { version = "1", default-features = false, features = ["std"] }
 # gzip for TLS reports (RFC 8460 §5.2); the pure-Rust miniz_oxide backend.
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+# ACME client (RFC 8555); ring only (its default aws-lc-rs is banned), and
+# no bundled HTTP client: ours goes through our resolver and address guard.
+instant-acme = { version = "0.8", default-features = false, features = ["ring"] }
+# Reading certificates (expiry, names, key) for renewal and DANE.
+x509-cert = { version = "0.2", default-features = false, features = ["std"] }
+der = { version = "0.7", default-features = false, features = ["std"] }
 rsa = { version = "0.9", default-features = false, features = ["std", "pem"] }
 rand_core = { version = "0.6", default-features = false, features = ["getrandom"] }
 hickory-resolver = { version = "=0.26.3", default-features = false, features = ["recursor", "dnssec-ring", "tokio"] }

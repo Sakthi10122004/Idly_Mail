@@ -1,5 +1,5 @@
 //! HTTPS for MTA-STS policy fetches (RFC 8461 §3.3) and TLS report
-//! uploads (RFC 8460 §5.4). Connections go through the same [`Dialer`] as
+//! uploads (RFC 8460 §5.4), and for the ACME client ([`Https`]). Connections go through the same [`Dialer`] as
 //! SMTP, so the SSRF guard applies: a host resolving to a private address
 //! is never contacted. Certificates are always checked against the
 //! trusted roots.
@@ -11,7 +11,7 @@ use std::time::Duration;
 use dns::Resolver;
 use http_body_util::{BodyExt, Full, Limited};
 use hyper::body::Bytes;
-use hyper::header::{CONTENT_TYPE, HOST, USER_AGENT};
+use hyper::header::{CONTENT_TYPE, HOST, HeaderValue, USER_AGENT};
 use hyper::{HeaderMap, Method, StatusCode};
 use hyper_util::rt::TokioIo;
 use rustls::RootCertStore;
@@ -85,9 +85,11 @@ pub(crate) async fn fetch<R: Resolver, D: Dialer>(
         request(
             net,
             &host,
+            443,
             Method::GET,
             "/.well-known/mta-sts.txt",
-            None,
+            HeaderMap::new(),
+            Bytes::new(),
             MAX_POLICY_SIZE,
         ),
     )
@@ -139,9 +141,11 @@ pub(crate) async fn post<R: Resolver, D: Dialer>(
         request(
             net,
             host,
+            443,
             Method::POST,
             path,
-            Some((content_type, body)),
+            content_headers(content_type),
+            Bytes::from(body),
             MAX_POST_RESPONSE,
         ),
     )
@@ -155,14 +159,90 @@ pub(crate) async fn post<R: Resolver, D: Dialer>(
     }
 }
 
-/// One HTTPS request to `host` (port 443). The response body is read up
-/// to `max_body` octets; more is an error.
+fn content_headers(content_type: &'static str) -> HeaderMap {
+    let mut h = HeaderMap::new();
+    h.insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
+    h
+}
+
+/// A guarded HTTPS client for other parts of Idly (the ACME client): names
+/// are resolved with our resolver, connections go through the dialer (so
+/// the address guard applies), and certificates are checked against the
+/// trusted roots. Plain HTTP is not offered.
+#[derive(Debug, Clone)]
+pub struct Https<R, D> {
+    resolver: R,
+    dialer: D,
+    roots: Arc<RootCertStore>,
+    families: Families,
+    sources: Sources,
+}
+
+impl<R: Resolver, D: Dialer> Https<R, D> {
+    pub fn new(
+        resolver: R,
+        dialer: D,
+        roots: Arc<RootCertStore>,
+        families: Families,
+        sources: Sources,
+    ) -> Self {
+        Self {
+            resolver,
+            dialer,
+            roots,
+            families,
+            sources,
+        }
+    }
+
+    /// Sends one request to an `https://` URL; the response body is read
+    /// up to `max_body` octets. Redirects are not followed.
+    pub async fn send(
+        &self,
+        method: Method,
+        url: &str,
+        headers: HeaderMap,
+        body: Bytes,
+        max_body: usize,
+    ) -> Result<(StatusCode, HeaderMap, Bytes), String> {
+        let uri: hyper::Uri = url.parse().map_err(|e| format!("{url}: {e}"))?;
+        if uri.scheme_str() != Some("https") {
+            return Err(format!("{url}: only https URLs are allowed"));
+        }
+        let host = uri
+            .host()
+            .ok_or_else(|| format!("{url}: no host"))?
+            .to_ascii_lowercase();
+        let port = uri.port_u16().unwrap_or(443);
+        let path = uri.path_and_query().map_or("/", |p| p.as_str());
+        let net = Net {
+            resolver: &self.resolver,
+            dialer: &self.dialer,
+            roots: &self.roots,
+            families: self.families,
+            sources: self.sources,
+        };
+        timeout(
+            FETCH_TIMEOUT,
+            request(net, &host, port, method, path, headers, body, max_body),
+        )
+        .await
+        .map_err(|_| format!("{url}: timed out"))?
+        .map_err(|e| e.to_string())
+    }
+}
+
+/// One HTTPS request to `host`:`port`. The response body is read up to
+/// `max_body` octets; more is an error.
+#[allow(clippy::too_many_arguments)]
 async fn request<R: Resolver, D: Dialer>(
     net: Net<'_, R, D>,
     host: &str,
+    port: u16,
     method: Method,
     path: &str,
-    body: Option<(&'static str, Vec<u8>)>,
+    headers: HeaderMap,
+    body: Bytes,
     max_body: usize,
 ) -> Result<(StatusCode, HeaderMap, Bytes), Failure> {
     let mut addrs: Vec<IpAddr> = Vec::new();
@@ -184,7 +264,7 @@ async fn request<R: Resolver, D: Dialer>(
     for ip in addrs.into_iter().take(4) {
         match net
             .dialer
-            .connect(SocketAddr::new(ip, 443), net.sources.for_ip(ip))
+            .connect(SocketAddr::new(ip, port), net.sources.for_ip(ip))
             .await
         {
             Ok(s) => {
@@ -214,21 +294,24 @@ async fn request<R: Resolver, D: Dialer>(
     let driver = tokio::spawn(async move {
         let _ = conn.await;
     });
+    let authority = if port == 443 {
+        host.to_owned()
+    } else {
+        format!("{host}:{port}")
+    };
     let mut builder = hyper::Request::builder()
         .method(method)
         .uri(path)
-        .header(HOST, host)
+        .header(HOST, authority)
         .header(USER_AGENT, "Idly Mail");
-    let payload = match body {
-        Some((content_type, bytes)) => {
-            builder = builder.header(CONTENT_TYPE, content_type);
-            Full::new(Bytes::from(bytes))
+    for (name, value) in &headers {
+        if name != HOST {
+            builder = builder.header(name, value);
         }
-        None => Full::new(Bytes::new()),
-    };
+    }
     let result = async {
         let request = builder
-            .body(payload)
+            .body(Full::new(body))
             .map_err(|e| Failure::Http(e.to_string()))?;
         let response = sender
             .send_request(request)

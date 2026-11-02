@@ -28,6 +28,8 @@ pub(crate) struct Metrics {
     pub(crate) messages_accepted: Counter,
     /// Failed SMTP AUTH attempts.
     pub(crate) auth_failures: Counter,
+    /// notAfter of the certificate in use, in Unix seconds (0: none).
+    pub(crate) certificate_expiry: Gauge,
 }
 
 impl Metrics {
@@ -37,6 +39,7 @@ impl Metrics {
         let smuggling_attempts = Counter::default();
         let messages_accepted = Counter::default();
         let auth_failures = Counter::default();
+        let certificate_expiry = Gauge::default();
         registry.register(
             "test_mode",
             "1 while test mode restricts outbound delivery",
@@ -57,12 +60,18 @@ impl Metrics {
             "Failed SMTP AUTH attempts",
             auth_failures.clone(),
         );
+        registry.register(
+            "tls_certificate_expiry_timestamp_seconds",
+            "When the TLS certificate in use expires (Unix time); 0 for none or self-signed",
+            certificate_expiry.clone(),
+        );
         Arc::new(Self {
             registry,
             test_mode,
             smuggling_attempts,
             messages_accepted,
             auth_failures,
+            certificate_expiry,
         })
     }
 

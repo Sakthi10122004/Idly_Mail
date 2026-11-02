@@ -1581,3 +1581,75 @@ async fn tls_reports_are_uploaded_over_https_with_retries() {
         "but the guard opened no connection"
     );
 }
+
+#[tokio::test]
+async fn https_client_for_acme_is_guarded() {
+    let pki = Pki::new();
+    let (tls, _, _) = pki.server(&["acme.example.net"]);
+    let sink = report_sink(tls).await;
+    sink.status.store(201, Ordering::SeqCst);
+    let resolver = || {
+        zone()
+            .with_ip("acme.example.net", ip("127.0.0.1"))
+            .with_ip("private.example.net", ip("10.0.0.7"))
+    };
+    let both = Families {
+        ipv4: true,
+        ipv6: true,
+    };
+    let https = smtp_client::Https::new(
+        resolver(),
+        Loopback::new().map(443, sink.port).map(14000, sink.port),
+        pki.roots(),
+        both,
+        Sources::default(),
+    );
+    let mut headers = hyper::HeaderMap::new();
+    headers.insert("content-type", "application/jose+json".parse().unwrap());
+    for url in [
+        "https://acme.example.net/new-order",
+        "https://acme.example.net:14000/new-order",
+    ] {
+        let (status, _, _) = https
+            .send(
+                hyper::Method::POST,
+                url,
+                headers.clone(),
+                Bytes::from_static(b"{}"),
+                1024,
+            )
+            .await
+            .unwrap();
+        assert_eq!(status, 201, "{url}");
+    }
+    let posts = sink.posts.lock().unwrap().clone();
+    assert_eq!(posts.len(), 2);
+    assert_eq!(posts[0].0, "/new-order");
+    assert_eq!(posts[0].1, "application/jose+json");
+
+    let err = https
+        .send(
+            hyper::Method::GET,
+            "http://acme.example.net/directory",
+            hyper::HeaderMap::new(),
+            Bytes::new(),
+            1024,
+        )
+        .await
+        .unwrap_err();
+    assert!(err.contains("only https"), "{err}");
+
+    // The production dialer refuses private addresses here too.
+    let direct = smtp_client::Https::new(resolver(), Direct, pki.roots(), both, Sources::default());
+    let err = direct
+        .send(
+            hyper::Method::GET,
+            "https://private.example.net/directory",
+            hyper::HeaderMap::new(),
+            Bytes::new(),
+            1024,
+        )
+        .await
+        .unwrap_err();
+    assert!(err.contains("refusing to connect to 10.0.0.7"), "{err}");
+}

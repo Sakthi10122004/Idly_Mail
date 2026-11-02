@@ -38,12 +38,40 @@ session_timeout = 1800      # hard cap on one SMTP session, seconds
 max_connections = 100       # simultaneous connections on port 25
 max_submission_connections = 50  # on 587/465, a separate pool
 
-# TLS certificate for STARTTLS (25, 587) and implicit TLS (465), PEM files.
-# Without it, port 25 runs without STARTTLS and 587/465 are not started,
-# because AUTH is never offered without TLS. ACME arrives in milestone 8.
+# The TLS certificate for STARTTLS (25, 587), implicit TLS (465) and the
+# MTA-STS policy (443) comes from ONE of these two sections. Without either,
+# port 25 runs without STARTTLS and 587/465 are not started, because AUTH is
+# never offered without TLS.
+#
+# 1. PEM files you manage yourself (e.g. with certbot). Changed files are
+#    picked up within 5 minutes; no restart needed.
 [tls]
 cert_file = "/etc/idly/tls/fullchain.pem"
 key_file = "/etc/idly/tls/privkey.pem"
+
+# 2. Automatic certificates from an ACME CA (Let's Encrypt by default),
+#    using HTTP-01 challenges on port 80. One certificate covers
+#    server.hostname and, with [mta_sts], mta-sts.<domain> for every domain;
+#    each name's A/AAAA record must point to this server. The key in
+#    <data_dir>/acme/tls.key is kept across renewals, so a DANE TLSA record
+#    ("3 1 1", see `idly dns`) stays valid. Until the first certificate
+#    arrives, a self-signed one is served.
+# [acme]
+# directory = "letsencrypt"            # or "letsencrypt-staging", or an https:// URL
+# contact = "postmaster@example.org"   # expiry and problem notices from the CA
+# accept_terms = true                  # required: you accept the CA's terms of service
+# listen = ["0.0.0.0:80", "[::]:80"]   # the CA connects to port 80
+
+# MTA-STS (RFC 8461): tells other servers to deliver to this one only over
+# validated TLS. Serves https://mta-sts.<domain>/.well-known/mta-sts.txt for
+# every domain; the certificate must cover those names ([acme] adds them).
+# Start with "testing" and switch to "enforce" once TLS reports show no
+# failures. The _mta-sts TXT record to publish is printed at startup.
+[mta_sts]
+enabled = false
+mode = "testing"                       # testing, enforce or none
+max_age = 604800                       # seconds senders cache the policy
+listen = ["0.0.0.0:443", "[::]:443"]
 
 # Domains this server handles. Repeat the block for each domain.
 [[domain]]

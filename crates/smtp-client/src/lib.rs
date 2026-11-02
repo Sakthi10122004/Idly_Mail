@@ -15,6 +15,7 @@
 
 pub mod dialer;
 mod fetch;
+pub use fetch::Https;
 pub mod guard;
 pub mod mta_sts;
 mod route;

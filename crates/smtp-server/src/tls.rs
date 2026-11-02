@@ -1,9 +1,11 @@
 //! TLS server configuration: rustls with the ring provider only, TLS 1.2
-//! and 1.3, certificates from PEM files (ACME arrives in milestone 8).
+//! and 1.3. The certificate comes from PEM files, or from a resolver that
+//! can swap it at run time (ACME renewals, changed files).
 
 use std::sync::Arc;
 
 use rustls::ServerConfig;
+use rustls::server::ResolvesServerCert;
 use rustls_pki_types::pem::PemObject;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 
@@ -36,5 +38,19 @@ pub fn server_config(cert_pem: &[u8], key_pem: &[u8]) -> Result<Arc<ServerConfig
         .with_no_client_auth()
         .with_single_cert(certs, key)
         .map_err(|e| TlsError(format!("certificate and key: {e}")))?;
+    Ok(Arc::new(config))
+}
+
+/// Builds a server config that asks `certs` for the certificate on each
+/// handshake, so a renewed certificate is used without a restart.
+pub fn server_config_with(
+    certs: Arc<dyn ResolvesServerCert>,
+) -> Result<Arc<ServerConfig>, TlsError> {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let config = ServerConfig::builder_with_provider(provider)
+        .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
+        .map_err(|e| TlsError(e.to_string()))?
+        .with_no_client_auth()
+        .with_cert_resolver(certs);
     Ok(Arc::new(config))
 }

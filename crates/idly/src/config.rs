@@ -26,6 +26,10 @@ pub(crate) struct Config {
     #[serde(default)]
     pub(crate) tls: Option<Tls>,
     #[serde(default)]
+    pub(crate) acme: Option<Acme>,
+    #[serde(default)]
+    pub(crate) mta_sts: MtaSts,
+    #[serde(default)]
     pub(crate) test_mode: TestMode,
     #[serde(default)]
     pub(crate) tls_reporting: TlsReporting,
@@ -188,7 +192,8 @@ fn default_max_submission_connections() -> usize {
     50
 }
 
-/// The TLS certificate for STARTTLS and port 465 (until ACME, milestone 8).
+/// A TLS certificate from files managed outside Idly. The files are
+/// re-read when they change, so a renewal needs no restart.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Tls {
@@ -196,6 +201,99 @@ pub(crate) struct Tls {
     pub(crate) cert_file: PathBuf,
     /// PEM private key (PKCS #8, PKCS #1 or SEC1).
     pub(crate) key_file: PathBuf,
+}
+
+/// Certificates from an ACME CA (RFC 8555), as an alternative to [tls].
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Acme {
+    /// `letsencrypt`, `letsencrypt-staging`, or a directory URL (https).
+    #[serde(default = "default_acme_directory")]
+    pub(crate) directory: String,
+    /// Given to the CA for expiry and problem notices.
+    #[serde(default)]
+    pub(crate) contact: Option<String>,
+    /// Must be true: you have read and accept the CA's terms of service.
+    #[serde(default)]
+    pub(crate) accept_terms: bool,
+    /// The HTTP-01 challenge server; the CA connects to port 80.
+    #[serde(default = "default_http")]
+    pub(crate) listen: Vec<SocketAddr>,
+}
+
+impl Acme {
+    /// The directory URL, with the shortcuts expanded.
+    pub(crate) fn directory_url(&self) -> &str {
+        match self.directory.as_str() {
+            "letsencrypt" => acme::LETS_ENCRYPT,
+            "letsencrypt-staging" => acme::LETS_ENCRYPT_STAGING,
+            url => url,
+        }
+    }
+}
+
+fn default_acme_directory() -> String {
+    "letsencrypt".to_owned()
+}
+fn default_http() -> Vec<SocketAddr> {
+    addrs(&["0.0.0.0:80", "[::]:80"])
+}
+fn default_https() -> Vec<SocketAddr> {
+    addrs(&["0.0.0.0:443", "[::]:443"])
+}
+
+/// Publishing an MTA-STS policy (RFC 8461 §3.2) for every domain at
+/// `https://mta-sts.<domain>/.well-known/mta-sts.txt`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct MtaSts {
+    #[serde(default)]
+    pub(crate) enabled: bool,
+    #[serde(default)]
+    pub(crate) mode: StsMode,
+    /// Seconds senders may cache the policy (RFC 8461 §3.2).
+    #[serde(default = "default_max_age")]
+    pub(crate) max_age: u64,
+    #[serde(default = "default_https")]
+    pub(crate) listen: Vec<SocketAddr>,
+}
+
+impl Default for MtaSts {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mode: StsMode::default(),
+            max_age: default_max_age(),
+            listen: default_https(),
+        }
+    }
+}
+
+fn default_max_age() -> u64 {
+    7 * 86_400
+}
+
+/// RFC 8461 §5: the policy modes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum StsMode {
+    /// Failures are reported (RFC 8460) but mail is still delivered.
+    #[default]
+    Testing,
+    /// Senders deliver only over validated TLS to our host name.
+    Enforce,
+    /// Withdraws a published policy.
+    None,
+}
+
+impl StsMode {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Testing => "testing",
+            Self::Enforce => "enforce",
+            Self::None => "none",
+        }
+    }
 }
 
 /// A domain this server receives and sends mail for.
@@ -341,6 +439,23 @@ impl Config {
     /// Parses TOML without validating.
     pub(crate) fn parse(text: &str) -> Result<Self, String> {
         toml::from_str(text).map_err(|e| e.to_string())
+    }
+
+    /// The names our certificate must cover: the host name, and
+    /// `mta-sts.<domain>` for each domain when MTA-STS is published.
+    pub(crate) fn certificate_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = domain_ascii(&self.server.hostname).into_iter().collect();
+        if self.mta_sts.enabled {
+            for d in &self.domains {
+                if let Some(d) = domain_ascii(&d.name) {
+                    let name = format!("mta-sts.{d}");
+                    if !names.contains(&name) {
+                        names.push(name);
+                    }
+                }
+            }
+        }
+        names
     }
 
     /// Whether `domain` (any case, U-label or A-label) is one of ours.
@@ -512,6 +627,61 @@ impl Config {
                     bad(key.into(), "must be an absolute path");
                 }
             }
+        }
+
+        if let Some(a) = &self.acme {
+            if self.tls.is_some() {
+                bad(
+                    "acme".into(),
+                    "use either [tls] certificate files or [acme], not both",
+                );
+            }
+            if !a.accept_terms {
+                bad(
+                    "acme.accept_terms".into(),
+                    "must be true: read the CA's terms of service first",
+                );
+            }
+            let url = a.directory_url();
+            let parsed = url.parse::<hyper::Uri>();
+            if !url.starts_with("https://") || parsed.map_or(true, |u| u.host().is_none()) {
+                bad(
+                    "acme.directory".into(),
+                    "must be letsencrypt, letsencrypt-staging or an https:// URL",
+                );
+            }
+            if let Some(c) = &a.contact
+                && Mailbox::parse(c).map_or(true, |m| !matches!(m.host, Host::Domain(_)))
+            {
+                bad("acme.contact".into(), "not a valid email address");
+            }
+            if a.listen.is_empty() {
+                bad(
+                    "acme.listen".into(),
+                    "needs an address; the CA connects to port 80",
+                );
+            }
+        }
+
+        let sts = &self.mta_sts;
+        if sts.enabled {
+            if self.tls.is_none() && self.acme.is_none() {
+                bad(
+                    "mta_sts".into(),
+                    "needs a certificate for mta-sts.<domain>: set up [acme] or [tls]",
+                );
+            }
+            if sts.listen.is_empty() {
+                bad("mta_sts.listen".into(), "needs an address (port 443)");
+            }
+        }
+        // RFC 8461 §3.2: at most 31557600; a day at least, so senders
+        // actually benefit from caching.
+        if !(86_400..=31_557_600).contains(&sts.max_age) {
+            bad(
+                "mta_sts.max_age".into(),
+                "must be between 86400 and 31557600 seconds",
+            );
         }
 
         if self.test_mode.enabled && self.test_mode.allow_domains.is_empty() {
@@ -782,5 +952,57 @@ mod tests {
         // Off by default, and then the address isn't needed.
         let c = Config::parse(MINIMAL).unwrap();
         assert!(!c.tls_reporting.enabled && c.tls_reporting.report_domain().is_none());
+    }
+
+    #[test]
+    fn acme_and_mta_sts() {
+        let acme = "[acme]\naccept_terms = true\ncontact = \"postmaster@example.org\"\n";
+        let c = Config::parse(&format!("{MINIMAL}\n{acme}")).unwrap();
+        c.validate().unwrap();
+        let a = c.acme.as_ref().unwrap();
+        assert_eq!(a.directory_url(), acme::LETS_ENCRYPT);
+        assert_eq!(a.listen.len(), 2);
+        assert_eq!(c.certificate_names(), ["mx.example.org"]);
+
+        let sts = "[mta_sts]\nenabled = true\nmode = \"enforce\"\n";
+        let c = Config::parse(&format!(
+            "{MINIMAL}\n[[domain]]\nname = \"Example.NET\"\n{acme}{sts}"
+        ))
+        .unwrap();
+        c.validate().unwrap();
+        assert_eq!(c.mta_sts.mode, StsMode::Enforce);
+        assert_eq!(c.mta_sts.max_age, 604_800);
+        assert_eq!(
+            c.certificate_names(),
+            [
+                "mx.example.org",
+                "mta-sts.example.org",
+                "mta-sts.example.net"
+            ]
+        );
+
+        assert_eq!(
+            problems(&format!("{MINIMAL}\n[acme]\n")),
+            ["acme.accept_terms: must be true: read the CA's terms of service first"]
+        );
+        let p = problems(&format!(
+            "{MINIMAL}\n[acme]\naccept_terms = true\ndirectory = \"http://ca.example/dir\"\ncontact = \"x\"\n"
+        ));
+        assert_eq!(p.len(), 2, "{p:?}");
+        assert!(p[0].starts_with("acme.directory") && p[1].starts_with("acme.contact"));
+        let both =
+            format!("{MINIMAL}\n{acme}[tls]\ncert_file = \"/c.pem\"\nkey_file = \"/k.pem\"\n");
+        assert_eq!(
+            problems(&both),
+            ["acme: use either [tls] certificate files or [acme], not both"]
+        );
+        assert_eq!(
+            problems(&format!("{MINIMAL}\n{sts}")),
+            ["mta_sts: needs a certificate for mta-sts.<domain>: set up [acme] or [tls]"]
+        );
+        assert_eq!(
+            problems(&format!("{MINIMAL}\n{acme}{sts}max_age = 60\n")),
+            ["mta_sts.max_age: must be between 86400 and 31557600 seconds"]
+        );
     }
 }
