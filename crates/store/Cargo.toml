@@ -1,0 +1,22 @@
+[package]
+name = "store"
+description = "Mailboxes and messages for Idly Mail: the Store trait's SQLite backend"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+blob.workspace = true
+mail-auth-glue.workspace = true
+rusqlite.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

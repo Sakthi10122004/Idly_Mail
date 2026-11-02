@@ -3,6 +3,9 @@
 //! arrives, and the message is still queued afterwards (RFC 5321 §6.1:
 //! the server takes responsibility once it says 250).
 //!
+//! A local delivery made before the kill must likewise be in the mail
+//! store.
+//!
 //! Runs locally: 127.0.0.1 only, test mode on, no DNS or outbound
 //! connections (the queue runner's next pass is 30 s away).
 
@@ -189,6 +192,16 @@ async fn kill_9_after_250_keeps_the_message() {
     command(&mut s, "EHLO client.example\r\n", "250").await;
     let auth = base64::engine::general_purpose::STANDARD.encode(b"\0alice@example.org\0secret");
     command(&mut s, &format!("AUTH PLAIN {auth}\r\n"), "235").await;
+    // First a message to a local mailbox: it goes into the mail store.
+    command(&mut s, "MAIL FROM:<alice@example.org>\r\n", "250").await;
+    command(&mut s, "RCPT TO:<alice@example.org>\r\n", "250").await;
+    command(&mut s, "DATA\r\n", "354").await;
+    s.get_mut()
+        .write_all(b"From: <alice@example.org>\r\nTo: <alice@example.org>\r\nSubject: note to self\r\n\r\nkept\r\n.\r\n")
+        .await
+        .unwrap();
+    assert!(reply(&mut s).await.starts_with("250"));
+    // Then one for the outbound queue; killed right after its 250.
     command(&mut s, "MAIL FROM:<alice@example.org>\r\n", "250").await;
     command(&mut s, "RCPT TO:<bob@remote.example>\r\n", "250").await;
     command(&mut s, "DATA\r\n", "354").await;
@@ -217,4 +230,10 @@ async fn kill_9_after_250_keeps_the_message() {
     let message = std::fs::read_to_string(spooled[0].path()).unwrap();
     assert!(message.contains("still here?"));
     assert!(message.contains("DKIM-Signature:"), "signed before queuing");
+
+    // The local message is in the store.
+    let out = idly(&config, &["user", "list"]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{out:?}");
+    assert!(text.contains("alice@example.org  messages=1"), "{text}");
 }

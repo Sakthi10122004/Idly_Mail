@@ -37,6 +37,7 @@ tls_handshake_timeout = 30  # seconds
 session_timeout = 1800      # hard cap on one SMTP session, seconds
 max_connections = 100       # simultaneous connections on port 25
 max_submission_connections = 50  # on 587/465, a separate pool
+# quota = 2147483648      # octets per account; over it: 452 4.2.2 (default: none)
 
 # The TLS certificate for STARTTLS (25, 587), implicit TLS (465) and the
 # MTA-STS policy (443) comes from ONE of these two sections. Without either,

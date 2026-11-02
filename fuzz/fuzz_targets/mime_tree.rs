@@ -1,6 +1,6 @@
 //! Fuzzes the MIME structure parser (RFC 2045, RFC 2046) used for IMAP
 //! BODYSTRUCTURE/ENVELOPE and JMAP: every range stays inside the message,
-//! limits hold, and decoding never panics.
+//! limits hold, and decoding (including Date, RFC 5322 §3.3) never panics.
 
 #![no_main]
 #![forbid(unsafe_code)]
@@ -39,4 +39,8 @@ fuzz_target!(|data: &[u8]| {
         let _ = m.display_name();
     }
     let _ = root.section(&[1, 2, 1]);
+    if let Some(d) = env.date.as_deref() {
+        let _ = structure::date::parse(d);
+    }
+    let _ = structure::date::parse(&String::from_utf8_lossy(data));
 });

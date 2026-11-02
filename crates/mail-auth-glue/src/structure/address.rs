@@ -9,7 +9,10 @@ use super::words;
 pub enum Address {
     Mailbox(Mailbox),
     /// `name: members;`
-    Group { name: String, members: Vec<Mailbox> },
+    Group {
+        name: String,
+        members: Vec<Mailbox>,
+    },
 }
 
 /// A mailbox. `name` is as written (encoded-words not decoded, quotes
@@ -267,7 +270,10 @@ fn mailbox(toks: &[Tok], start: usize, in_group: bool) -> (Option<Mailbox>, usiz
 
 /// local-part ["@" domain]; None if there is no local part.
 fn addr_spec(toks: &[Tok]) -> Option<(String, Option<String>)> {
-    let toks: Vec<&Tok> = toks.iter().filter(|t| !matches!(t, Tok::Comment(_))).collect();
+    let toks: Vec<&Tok> = toks
+        .iter()
+        .filter(|t| !matches!(t, Tok::Comment(_)))
+        .collect();
     let at = toks.iter().rposition(|t| **t == Tok::Special('@'));
     let (local_toks, domain_toks) = match at {
         Some(a) => (toks.get(..a).unwrap_or_default(), toks.get(a + 1..)),
@@ -355,14 +361,29 @@ mod tests {
 
     #[test]
     fn garbage_never_panics() {
-        for v in [&b""[..], b"<", b"<>", b"@", b"a@", b":;", b"\"", b"(((", b"x <y", b";;,,::", b"[a@b"] {
+        for v in [
+            &b""[..],
+            b"<",
+            b"<>",
+            b"@",
+            b"a@",
+            b":;",
+            b"\"",
+            b"(((",
+            b"x <y",
+            b";;,,::",
+            b"[a@b",
+        ] {
             let _ = parse_list(v);
         }
         assert_eq!(parse_list(b"<>"), []);
-        assert_eq!(parse_list(b"undisclosed"), [Address::Mailbox(Mailbox {
-            name: None,
-            local: "undisclosed".into(),
-            domain: None
-        })]);
+        assert_eq!(
+            parse_list(b"undisclosed"),
+            [Address::Mailbox(Mailbox {
+                name: None,
+                local: "undisclosed".into(),
+                domain: None
+            })]
+        );
     }
 }

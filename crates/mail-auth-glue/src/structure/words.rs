@@ -21,9 +21,7 @@ pub fn decode(raw: &[u8]) -> String {
             out.push_str(ws);
             break;
         }
-        let word_len = after
-            .find([' ', '\t'])
-            .unwrap_or(after.len());
+        let word_len = after.find([' ', '\t']).unwrap_or(after.len());
         let (word, tail) = after.split_at(word_len);
         match decode_word(word) {
             Some(decoded) => {
@@ -86,9 +84,10 @@ fn q_decode(b: &[u8]) -> Vec<u8> {
         match c {
             b'_' => out.push(b' '),
             b'=' => {
-                if let (Some(h), Some(l)) =
-                    (b.get(i + 1).and_then(|x| hex(*x)), b.get(i + 2).and_then(|x| hex(*x)))
-                {
+                if let (Some(h), Some(l)) = (
+                    b.get(i + 1).and_then(|x| hex(*x)),
+                    b.get(i + 2).and_then(|x| hex(*x)),
+                ) {
                     out.push(h << 4 | l);
                     i += 3;
                     continue;
@@ -112,7 +111,10 @@ mod tests {
         assert_eq!(decode(b"=?ISO-8859-1?Q?a?="), "a");
         assert_eq!(decode(b"=?ISO-8859-1?Q?a?= b"), "a b");
         assert_eq!(decode(b"=?ISO-8859-1?Q?a?= =?ISO-8859-1?Q?b?="), "ab");
-        assert_eq!(decode(b"=?ISO-8859-1?Q?a?=  \r\n  =?ISO-8859-1?Q?b?="), "ab");
+        assert_eq!(
+            decode(b"=?ISO-8859-1?Q?a?=  \r\n  =?ISO-8859-1?Q?b?="),
+            "ab"
+        );
         assert_eq!(decode(b"=?ISO-8859-1?Q?a_b?="), "a b");
         assert_eq!(decode(b"=?ISO-8859-1?Q?a?= =?ISO-8859-2?Q?_b?="), "a b");
         assert_eq!(

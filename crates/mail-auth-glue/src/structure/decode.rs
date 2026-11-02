@@ -112,7 +112,10 @@ mod tests {
 
     #[test]
     fn quoted_printable_rules() {
-        assert_eq!(quoted_printable(b"caf=C3=A9 =\r\nok"), "caf\u{e9} ok".as_bytes());
+        assert_eq!(
+            quoted_printable(b"caf=C3=A9 =\r\nok"),
+            "caf\u{e9} ok".as_bytes()
+        );
         assert_eq!(quoted_printable(b"a=\nb"), b"ab");
         assert_eq!(quoted_printable(b"100=%"), b"100=%");
         assert_eq!(quoted_printable(b"x=zz"), b"x=zz");

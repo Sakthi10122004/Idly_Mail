@@ -9,6 +9,40 @@ grouped by development phase (see the roadmap in [README.md](README.md)).
 
 ## [Unreleased]
 
+### Phase 2 — Mailboxes (in progress)
+
+#### Added
+- **Mail store** (new `store` and `blob` crates). Local mail is now
+  delivered into a SQLite store instead of Maildir. `--demo` still uses
+  Maildir.
+  - Each account gets the mailboxes INBOX, Sent, Drafts, Junk, Trash and
+    Archive. DMARC quarantine and permerror mail goes to Junk.
+  - Message content is stored once, under its BLAKE3 hash, however many
+    copies exist. It is fsynced before the database commit, and every read
+    checks the hash. Unreferenced content is removed after a day.
+  - The store keeps what IMAP and JMAP need: per-mailbox UIDs and
+    UIDVALIDITY, a modification sequence for every change (CONDSTORE), a
+    log of expunged messages (QRESYNC), and conversation threads from
+    Message-ID / In-Reply-To / References.
+  - A `kill -9` right after the 250 reply loses nothing: the crash test
+    now checks local delivery into the store too.
+- **`[limits] quota`**: octets of mail per account. Over it, delivery
+  gets `452 4.2.2 Mailbox full` and the sender retries later.
+- **`idly import maildir`** moves Phase 1 mail from `<data_dir>/maildir`
+  into the store. It keeps Maildir flags and arrival times, and moves each
+  imported file to `maildir.imported/`. Running it twice is safe.
+  `idly serve` warns while Maildir mail is waiting.
+- **`idly user list`**: the message count, size and quota of each account.
+- **MIME structure parser** (`mail-auth-glue::structure`, our own code),
+  for IMAP and JMAP:
+  - multipart and embedded messages, with RFC 2231 parameters and RFC
+    2047 encoded-words;
+  - base64, quoted-printable and legacy charsets (`encoding_rs`);
+  - addresses with display names and groups, and the Date header.
+
+  It never fails on broken mail, and its nesting and part count are
+  bounded. New fuzz target `mime_tree`.
+
 ### Phase 1 — Send and receive (in progress)
 
 #### Added

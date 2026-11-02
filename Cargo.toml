@@ -18,6 +18,8 @@ mail-auth-glue = { path = "crates/mail-auth-glue" }
 queue = { path = "crates/queue" }
 smtp-client = { path = "crates/smtp-client" }
 acme = { path = "crates/acme" }
+blob = { path = "crates/blob" }
+store = { path = "crates/store" }
 rustls = { version = "0.23", default-features = false, features = ["ring", "tls12", "std", "logging"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 rustls-pki-types = { version = "1", features = ["std"] }
@@ -43,6 +45,9 @@ rsa = { version = "0.9", default-features = false, features = ["std", "pem"] }
 rand_core = { version = "0.6", default-features = false, features = ["getrandom"] }
 hickory-resolver = { version = "=0.26.3", default-features = false, features = ["recursor", "dnssec-ring", "tokio"] }
 tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread", "macros", "net", "time", "sync", "io-util", "signal", "fs"] }
+# Blob ids (content addresses). "pure": Rust code only, no C or assembly
+# compiled by build.rs.
+blake3 = { version = "1", default-features = false, features = ["std", "pure"] }
 # Legacy charsets in mail (ISO-8859-*, Shift_JIS, ...) for IMAP/JMAP.
 encoding_rs = "0.8"
 idna = { version = "1", default-features = false, features = ["std", "compiled_data"] }

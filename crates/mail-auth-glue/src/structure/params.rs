@@ -17,7 +17,10 @@ impl Parameterized {
     pub fn parse(raw: &[u8]) -> Self {
         let text = String::from_utf8_lossy(raw);
         let mut pieces = split_semicolons(&text).into_iter();
-        let value = pieces.next().map(|v| v.trim().to_owned()).unwrap_or_default();
+        let value = pieces
+            .next()
+            .map(|v| v.trim().to_owned())
+            .unwrap_or_default();
         let mut params = Vec::new();
         for p in pieces {
             let Some((name, val)) = p.split_once('=') else {
@@ -35,12 +38,20 @@ impl Parameterized {
     /// The parameter `name` (case-insensitive), decoded: RFC 2231
     /// continuations joined and `charset'lang'%XX` decoded to UTF-8.
     pub fn param(&self, name: &str) -> Option<String> {
-        if let Some((_, v)) = self.params.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)) {
+        if let Some((_, v)) = self
+            .params
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
+        {
             return Some(v.clone());
         }
         // RFC 2231 §4: `name*` alone is an extended (encoded) value.
         let star = format!("{name}*");
-        if let Some((_, v)) = self.params.iter().find(|(n, _)| n.eq_ignore_ascii_case(&star)) {
+        if let Some((_, v)) = self
+            .params
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(&star))
+        {
             return Some(decode_extended(v, true).0);
         }
         // RFC 2231 §3: continuations `name*0`, `name*1*`, ... in order.
@@ -93,7 +104,9 @@ fn is_token_char_or_star(b: u8) -> bool {
 
 fn strip_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
     let head = s.get(..prefix.len())?;
-    head.eq_ignore_ascii_case(prefix).then(|| s.get(prefix.len()..)).flatten()
+    head.eq_ignore_ascii_case(prefix)
+        .then(|| s.get(prefix.len()..))
+        .flatten()
 }
 
 /// Splits on `;` outside quoted-strings and comments; comments dropped.
@@ -175,7 +188,10 @@ fn percent_decode(b: &[u8]) -> Vec<u8> {
     let mut i = 0usize;
     while let Some(&c) = b.get(i) {
         if c == b'%'
-            && let (Some(h), Some(l)) = (b.get(i + 1).and_then(|x| hex(*x)), b.get(i + 2).and_then(|x| hex(*x)))
+            && let (Some(h), Some(l)) = (
+                b.get(i + 1).and_then(|x| hex(*x)),
+                b.get(i + 2).and_then(|x| hex(*x)),
+            )
         {
             out.push(h << 4 | l);
             i += 3;
@@ -236,7 +252,14 @@ mod tests {
 
     #[test]
     fn junk_is_tolerated() {
-        for v in [&b""[..], b";;;", b"text/plain; =x; a", b"x; \"unterminated", b"(((", b"a; b*00=x"] {
+        for v in [
+            &b""[..],
+            b";;;",
+            b"text/plain; =x; a",
+            b"x; \"unterminated",
+            b"(((",
+            b"a; b*00=x",
+        ] {
             let p = Parameterized::parse(v);
             let _ = p.param("b");
         }

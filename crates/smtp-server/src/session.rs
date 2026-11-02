@@ -898,6 +898,10 @@ where
                 self.reply(250, (2, 0, 0), &format!("OK, queued as {}", envelope.id));
             }
             Err(e) if e.kind() == std::io::ErrorKind::StorageFull => self.no_space(),
+            // RFC 3463 §3.3 X.2.2 mailbox full; temporary (RFC 5321 §4.2.2).
+            Err(e) if e.kind() == std::io::ErrorKind::QuotaExceeded => {
+                self.reply(452, (4, 2, 2), "Mailbox full");
+            }
             Err(e) => {
                 tracing::error!(id = %envelope.id, error = %e, "delivery failed");
                 // RFC 3463 §3.4: X.3.0 mail system problem; the client retries.

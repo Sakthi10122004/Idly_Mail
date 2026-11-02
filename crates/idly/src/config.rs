@@ -139,6 +139,10 @@ pub(crate) struct Limits {
     /// so a flood on port 25 can't lock users out.
     #[serde(default = "default_max_submission_connections")]
     pub(crate) max_submission_connections: usize,
+    /// Octets of mail each account may store; none: unlimited. Over it,
+    /// delivery gets 452 4.2.2 and IMAP APPEND fails with OVERQUOTA.
+    #[serde(default)]
+    pub(crate) quota: Option<u64>,
 }
 
 impl Default for Limits {
@@ -155,6 +159,7 @@ impl Default for Limits {
             session_timeout: default_session_timeout(),
             max_connections: default_max_connections(),
             max_submission_connections: default_max_submission_connections(),
+            quota: None,
         }
     }
 }

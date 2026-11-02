@@ -8,6 +8,7 @@
 //! verbatim. Nesting and the number of parts are bounded.
 
 pub mod address;
+pub mod date;
 pub mod decode;
 pub mod params;
 pub mod words;
@@ -71,7 +72,9 @@ pub enum Kind {
 impl Part {
     /// The first field named `name`, case-insensitive.
     pub fn field(&self, name: &str) -> Option<&Field> {
-        self.fields.iter().find(|f| f.name.eq_ignore_ascii_case(name))
+        self.fields
+            .iter()
+            .find(|f| f.name.eq_ignore_ascii_case(name))
     }
 
     /// `type/subtype`.
@@ -276,7 +279,12 @@ fn entity(
             }
         }
     }
-    if media_type == "text" && media_subtype == "plain" && params.param("charset").is_none() && !digest_child && field("Content-Type").is_none() {
+    if media_type == "text"
+        && media_subtype == "plain"
+        && params.param("charset").is_none()
+        && !digest_child
+        && field("Content-Type").is_none()
+    {
         params.params.push(("charset".into(), "us-ascii".into()));
     }
     let encoding = text("Content-Transfer-Encoding")
@@ -381,7 +389,10 @@ fn split_multipart(msg: &[u8], body: Range<usize>, boundary: &[u8]) -> Vec<Range
                 Some(r) => (true, r),
                 None => (false, rest),
             };
-            if rest.iter().all(|b| matches!(b, b' ' | b'\t' | b'\r' | b'\n')) {
+            if rest
+                .iter()
+                .all(|b| matches!(b, b' ' | b'\t' | b'\r' | b'\n'))
+            {
                 if let Some(start) = current.take() {
                     // Drop the line break that precedes the delimiter.
                     let mut stop = pos;

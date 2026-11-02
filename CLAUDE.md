@@ -176,6 +176,24 @@ first, before any decision below.
    The sum of these budgets stays below the overall check timeout, so the
    fail-open in rule 1 can't be reached through slow attacker DNS.
 
+## Phase 2 design decisions (maintainer-approved, 2026-11-02)
+
+- Phase 1 Maildir mail moves into the store only through
+  `idly import maildir`, never automatically. The command is idempotent,
+  moves imported files to `maildir.imported/`, and `serve` warns while
+  unimported mail exists. `--demo` keeps delivering to Maildir.
+- JMAP authentication is HTTP Basic with the account password, over TLS
+  only. A successful login is cached in memory for 15 minutes, keyed by a
+  hash of user+password, with the same brute-force limits as SMTP AUTH.
+- The MIME parser (`mail-auth-glue::structure`) is our own code;
+  Stalwart's mail-parser is not used.
+- Search uses Tantivy without zstd, so no C code. If that turns out to be
+  impossible, the fallback is SQLite FTS5.
+- Store model: each message is in exactly one mailbox (JMAP
+  `maxMailboxesPerEmail: 1`), with one MODSEQ counter per account
+  (CONDSTORE and JMAP state). Blobs are BLAKE3-addressed, fsynced before
+  the row commits, and unreferenced ones are removed after a day.
+
 ## RFC citations
 
 Cite as `RFC NNNN §X.Y`. `scripts/check-rfc-cites --fetch` (also run in CI)

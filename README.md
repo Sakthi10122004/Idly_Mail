@@ -10,7 +10,9 @@ scale out to a cluster later.
 > them and delivers them directly to each recipient's MX (with DANE,
 > MTA-STS or opportunistic TLS, and daily TLS reports to domains that ask
 > for them). TLS certificates can come from Let's Encrypt (ACME), and
-> Idly can publish an MTA-STS policy. Not yet tested against real providers.
+> Idly can publish an MTA-STS policy. Local mail is kept in a mail store;
+> IMAP and JMAP access (Phase 2) are in progress. Not yet tested against
+> real providers.
 > A local, receive-only demo is in [Try it locally](#try-it-locally). See
 > [Roadmap](#roadmap).
 

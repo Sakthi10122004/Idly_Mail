@@ -17,6 +17,7 @@ mod config;
 mod directory;
 mod dkim;
 mod listen;
+mod mailstore;
 mod metrics;
 mod mta_sts;
 mod outbound;
@@ -75,6 +76,18 @@ enum Command {
         #[command(subcommand)]
         command: QueueCommand,
     },
+    /// Import mail from elsewhere into the mail store.
+    Import {
+        #[command(subcommand)]
+        command: ImportCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ImportCommand {
+    /// Import Phase 1 mail from <data_dir>/maildir; imported files move to
+    /// <data_dir>/maildir.imported. Safe to run again.
+    Maildir,
 }
 
 #[derive(Debug, Subcommand)]
@@ -98,6 +111,8 @@ enum UserCommand {
     /// Read a password from standard input and print its Argon2id hash for
     /// `password_hash` in `[[account]]`.
     HashPassword,
+    /// List the accounts with their mail count, size and quota.
+    List,
 }
 
 #[derive(Debug, Subcommand)]
@@ -139,6 +154,53 @@ fn main() -> ExitCode {
         Command::User {
             command: UserCommand::HashPassword,
         } => hash_password(),
+        Command::User {
+            command: UserCommand::List,
+        } => {
+            let config = match Config::load(&cli.config) {
+                Ok(c) => c,
+                Err(e) => return fail(&e),
+            };
+            let store = match mailstore::open(&config) {
+                Ok(s) => s,
+                Err(e) => return fail(&e),
+            };
+            let accounts = match store.accounts() {
+                Ok(a) => a,
+                Err(e) => return fail(&e),
+            };
+            for (id, address) in accounts {
+                let (count, size) = store.usage(id).unwrap_or_default();
+                let quota = config
+                    .limits
+                    .quota
+                    .map_or_else(|| "unlimited".to_owned(), |q| format!("{q} octets"));
+                println!("{address}  messages={count}  size={size} octets  quota={quota}");
+            }
+            ExitCode::SUCCESS
+        }
+        Command::Import {
+            command: ImportCommand::Maildir,
+        } => {
+            let config = match Config::load(&cli.config) {
+                Ok(c) => c,
+                Err(e) => return fail(&e),
+            };
+            let store = match mailstore::open(&config) {
+                Ok(s) => s,
+                Err(e) => return fail(&e),
+            };
+            match mailstore::import_maildir(&config, &store) {
+                Ok((n, dup, unknown)) => {
+                    println!("imported {n} message(s); {dup} were already in the store");
+                    for d in unknown {
+                        eprintln!("warning: maildir/{d} belongs to no [[account]]; left in place");
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => fail(&e),
+            }
+        }
         Command::Dkim {
             command:
                 DkimCommand::Generate {
@@ -520,8 +582,7 @@ async fn start_demo(config: &Config, metrics: Arc<metrics::Metrics>) -> std::io:
 /// 587 and 465 with AUTH, local mail to Maildir, remote mail to the queue.
 async fn start(config: &Config, metrics: Arc<metrics::Metrics>) -> std::io::Result<()> {
     use smtp_proto::address::domain_to_ascii;
-    use smtp_server::maildir::Maildir;
-    use smtp_server::{Delivery, Mode, Server};
+    use smtp_server::{Mode, Server};
 
     let other =
         |what: &str, e: &dyn std::fmt::Display| std::io::Error::other(format!("{what}: {e}"));
@@ -635,10 +696,22 @@ async fn start(config: &Config, metrics: Arc<metrics::Metrics>) -> std::io::Resu
 
     let mut listen_config = listener_config(config, true);
     listen_config.test_mode_allow = test_mode_allow;
-    let sink = Delivery {
-        maildir: Maildir::new(data.join("maildir"), hostname)
-            .with_min_free_space(config.limits.min_free_space, probe),
+    // Local mail goes into the mail store (Phase 2); Phase 1 Maildir mail
+    // is imported only when the operator runs `idly import maildir`.
+    let store = mailstore::open(config).map_err(|e| other("mail store", &e))?;
+    if mailstore::maildir_pending(data) {
+        tracing::warn!(
+            maildir = %data.join("maildir").display(),
+            "Phase 1 mail is still in Maildir; run `idly import maildir` to move it into the mail store"
+        );
+    }
+    tokio::spawn(mailstore::collect_garbage(store.clone()));
+    let sink = mailstore::StoreDelivery {
+        store,
         queue,
+        data_dir: data.clone(),
+        min_free: config.limits.min_free_space,
+        probe,
     };
     let mut server = Server::new(
         listen_config,
