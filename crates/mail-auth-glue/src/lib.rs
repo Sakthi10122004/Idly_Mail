@@ -9,5 +9,6 @@ pub mod auth_results;
 pub mod dkim;
 pub mod dmarc;
 pub mod message;
+pub mod mime;
 pub mod spf;
 pub mod tags;

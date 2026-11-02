@@ -197,15 +197,33 @@ fn tokenize(v: &[u8]) -> Option<Vec<Token>> {
 /// A-label form. Returns None if the field can't be parsed or a mailbox
 /// has no valid domain: DMARC must then treat the message as unauthenticatable.
 pub fn address_domains(value: &[u8]) -> Option<Vec<String>> {
+    Some(mailboxes(value)?.into_iter().map(|(_, d)| d).collect())
+}
+
+/// Every address in an address-list field such as From, as
+/// `local-part@domain` with the domain lower-cased in A-label form and the
+/// local-part as written (quotes removed). Returns None if the field can't
+/// be parsed or any mailbox lacks a valid domain.
+pub fn address_list(value: &[u8]) -> Option<Vec<String>> {
+    Some(
+        mailboxes(value)?
+            .into_iter()
+            .map(|(l, d)| format!("{l}@{d}"))
+            .collect(),
+    )
+}
+
+/// (local-part, domain) of every mailbox in an address list.
+fn mailboxes(value: &[u8]) -> Option<Vec<(String, String)>> {
     let tokens = tokenize(value)?;
-    let mut domains = Vec::new();
+    let mut out = Vec::new();
     // Split into mailboxes at top-level commas, and drop group names
     // ("name:" ... ";", RFC 5322 §3.4).
     let mut current: Vec<Token> = Vec::new();
     let mut in_angle = false;
-    let flush = |current: &mut Vec<Token>, domains: &mut Vec<String>| -> Option<()> {
+    let flush = |current: &mut Vec<Token>, out: &mut Vec<(String, String)>| -> Option<()> {
         if !current.is_empty() {
-            domains.push(mailbox_domain(current)?);
+            out.push(mailbox_address(current)?);
             current.clear();
         }
         Some(())
@@ -220,19 +238,19 @@ pub fn address_domains(value: &[u8]) -> Option<Vec<String>> {
                 in_angle = false;
                 current.push(t);
             }
-            Token::Special(b',' | b';') if !in_angle => flush(&mut current, &mut domains)?,
+            Token::Special(b',' | b';') if !in_angle => flush(&mut current, &mut out)?,
             // A group name: everything so far was the display name of the group.
             Token::Special(b':') if !in_angle => current.clear(),
             _ => current.push(t),
         }
     }
-    flush(&mut current, &mut domains)?;
-    Some(domains)
+    flush(&mut current, &mut out)?;
+    Some(out)
 }
 
-/// The domain of one mailbox: `name-addr` (`[display-name] <addr-spec>`)
-/// or a bare `addr-spec`.
-fn mailbox_domain(tokens: &[Token]) -> Option<String> {
+/// The local-part and domain of one mailbox: `name-addr`
+/// (`[display-name] <addr-spec>`) or a bare `addr-spec`.
+fn mailbox_address(tokens: &[Token]) -> Option<(String, String)> {
     let spec: &[Token] = match tokens.iter().position(|t| *t == Token::Special(b'<')) {
         Some(open) => {
             let inner = tokens.get(open + 1..)?;
@@ -242,6 +260,16 @@ fn mailbox_domain(tokens: &[Token]) -> Option<String> {
         None => tokens,
     };
     let at = spec.iter().rposition(|t| *t == Token::Special(b'@'))?;
+    let mut local = String::new();
+    for t in spec.get(..at)? {
+        match t {
+            Token::Word(w) => local.push_str(w),
+            _ => return None,
+        }
+    }
+    if local.is_empty() {
+        return None;
+    }
     let mut domain = String::new();
     for t in spec.get(at + 1..)? {
         match t {
@@ -250,10 +278,11 @@ fn mailbox_domain(tokens: &[Token]) -> Option<String> {
             _ => return None,
         }
     }
-    match Host::parse(&domain).ok()? {
-        Host::Domain(d) => domain_to_ascii(&d).ok(),
-        _ => None,
-    }
+    let domain = match Host::parse(&domain).ok()? {
+        Host::Domain(d) => domain_to_ascii(&d).ok()?,
+        _ => return None,
+    };
+    Some((local, domain))
 }
 
 #[cfg(test)]
@@ -337,6 +366,24 @@ mod tests {
             assert_eq!(d(bad), None, "{bad}");
         }
         assert_eq!(d(""), Some(vec![]));
+    }
+
+    #[test]
+    fn full_addresses() {
+        let a = |v: &str| address_list(v.as_bytes());
+        assert_eq!(
+            a(" Alice <Alice@Example.ORG>"),
+            Some(vec!["Alice@example.org".into()])
+        );
+        assert_eq!(
+            a(" \"a b\"@example.org, c@Bücher.example"),
+            Some(vec![
+                "a b@example.org".into(),
+                "c@xn--bcher-kva.example".into()
+            ])
+        );
+        assert_eq!(a(" @example.org"), None, "empty local-part");
+        assert_eq!(a(" <a@[1.2.3.4]>"), None);
     }
 
     #[test]

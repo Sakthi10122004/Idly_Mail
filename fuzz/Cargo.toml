@@ -89,3 +89,10 @@ path = "fuzz_targets/auth_results.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "mime_fix"
+path = "fuzz_targets/mime_fix.rs"
+test = false
+doc = false
+bench = false
