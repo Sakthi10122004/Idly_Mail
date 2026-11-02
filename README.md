@@ -78,6 +78,13 @@ Fuzzing (needs nightly and `cargo install cargo-fuzz`):
 cargo +nightly fuzz run command_parse -- -max_total_time=60
 ```
 
+## Deploying
+
+[docs/deploy.md](docs/deploy.md) takes a fresh VPS to a server whose mail
+Gmail accepts: install, configuration, DNS records (`idly dns`), the
+systemd unit ([docs/idly.service](docs/idly.service)) and the end-to-end
+test.
+
 ## Try it locally
 
 A receive-only demo runs on your own machine. It only listens on 127.0.0.1

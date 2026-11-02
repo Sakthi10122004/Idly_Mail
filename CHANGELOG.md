@@ -259,6 +259,9 @@ grouped by development phase (see the roadmap in [README.md](README.md)).
     likely blocks port 25, and the warning says so.
   - The certificate expiring within 14 days.
   - Metrics: `idly_outbound_port25_open`, `idly_reverse_dns_problems`.
+- **Deployment guide** (`docs/deploy.md`) and a hardened systemd unit
+  (`docs/idly.service`: unprivileged user, only `CAP_NET_BIND_SERVICE`,
+  read-only system, writable data directory only).
 - **Interop tests against Postfix** (`scripts/interop-test`, also run in
   CI; needs Docker). Idly runs in the test process and Postfix in a
   container pinned by digest. Four scenarios:
@@ -330,6 +333,10 @@ grouped by development phase (see the roadmap in [README.md](README.md)).
   §5.3).
 
 #### Fixed
+- **`idly serve` could not start with the default listen addresses on
+  Linux.** `[::]:25` also claimed IPv4 port 25, so binding it after
+  `0.0.0.0:25` failed with "address in use". IPv6 listeners are now
+  IPv6-only. On a host without IPv6 they are skipped with a warning.
 - **DNSSEC answers from zones signed with several keys came out as
   insecure.** For example, Debian's DANE records were affected, so DANE
   would silently never have applied to them. Only the data records now

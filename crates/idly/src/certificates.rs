@@ -19,7 +19,6 @@ use hyper::body::Bytes;
 use rustls::sign::CertifiedKey;
 use rustls_pki_types::PrivateKeyDer;
 use rustls_pki_types::pem::PemObject;
-use tokio::net::TcpListener;
 
 use crate::config::{self, Config};
 use crate::metrics::Metrics;
@@ -55,8 +54,7 @@ pub(crate) async fn start(
     } else if let Some(a) = &config.acme {
         let store = acme::Store::open(&config.server.data_dir.join("acme"))?;
         let challenges = Challenges::default();
-        for &addr in &a.listen {
-            let listener = bind(addr).await?;
+        for (addr, listener) in crate::listen::bind_all(&a.listen)? {
             tracing::info!(%addr, "ACME HTTP-01 listener ready");
             tokio::spawn(serve(
                 addr,
@@ -106,8 +104,7 @@ async fn serve_mta_sts(config: &Config, certs: Arc<Certs>) -> io::Result<()> {
     let mut tls = (*smtp_server::tls::server_config_with(certs).map_err(io::Error::other)?).clone();
     tls.alpn_protocols = vec![b"http/1.1".to_vec()];
     let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(tls));
-    for &addr in &config.mta_sts.listen {
-        let listener = bind(addr).await?;
+    for (addr, listener) in crate::listen::bind_all(&config.mta_sts.listen)? {
         tracing::info!(%addr, mode = config.mta_sts.mode.as_str(), "MTA-STS policy listener ready");
         tokio::spawn(serve(
             addr,
@@ -119,12 +116,6 @@ async fn serve_mta_sts(config: &Config, certs: Arc<Certs>) -> io::Result<()> {
         ));
     }
     Ok(())
-}
-
-async fn bind(addr: std::net::SocketAddr) -> io::Result<TcpListener> {
-    TcpListener::bind(addr)
-        .await
-        .map_err(|e| io::Error::new(e.kind(), format!("cannot listen on {addr}: {e}")))
 }
 
 async fn serve(addr: std::net::SocketAddr, server: impl Future<Output = io::Result<()>>) {

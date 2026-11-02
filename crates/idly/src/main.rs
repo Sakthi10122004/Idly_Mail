@@ -16,6 +16,7 @@ mod checks;
 mod config;
 mod directory;
 mod dkim;
+mod listen;
 mod metrics;
 mod mta_sts;
 mod outbound;
@@ -476,10 +477,7 @@ where
     O: smtp_server::Observer,
     R: dns::Resolver + 'static,
 {
-    for &addr in addrs {
-        let listener = tokio::net::TcpListener::bind(addr)
-            .await
-            .map_err(|e| std::io::Error::new(e.kind(), format!("cannot listen on {addr}: {e}")))?;
+    for (addr, listener) in listen::bind_all(addrs)? {
         tracing::info!(%addr, ?mode, "SMTP listener ready");
         let server = server.clone();
         tokio::spawn(async move {

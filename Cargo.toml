@@ -26,6 +26,8 @@ argon2 = "0.6"
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem", "crypto"] }
 rusqlite = { version = "0.41", default-features = false, features = ["bundled", "fallible_uint"] }
 rustix = { version = "1", default-features = false, features = ["std", "fs"] }
+# IPv6-only listening sockets (already in the tree through tokio).
+socket2 = "0.6"
 ring = { version = "0.17", default-features = false, features = ["std"] }
 base64 = { version = "0.23", default-features = false, features = ["std"] }
 serde_json = { version = "1", default-features = false, features = ["std"] }

@@ -14,7 +14,6 @@ use prometheus_client::encoding::text::encode;
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::gauge::Gauge;
 use prometheus_client::registry::Registry;
-use tokio::net::TcpListener;
 
 /// All metrics, shared by every part of the server.
 #[derive(Debug)]
@@ -121,7 +120,8 @@ impl smtp_server::Observer for MetricsObserver {
 
 /// Serves `GET /metrics` on `addr` until the task is dropped.
 pub(crate) async fn serve(addr: SocketAddr, metrics: Arc<Metrics>) -> std::io::Result<()> {
-    let listener = TcpListener::bind(addr).await?;
+    let listener = crate::listen::bind(addr)
+        .map_err(|e| std::io::Error::new(e.kind(), format!("cannot listen on {addr}: {e}")))?;
     if !addr.ip().is_loopback() {
         tracing::warn!(%addr, "metrics endpoint is not on loopback; anyone who can reach it can read it");
     }
@@ -171,7 +171,7 @@ mod tests {
     #[tokio::test]
     async fn http_endpoint() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         drop(listener);
         let m = Metrics::new();
