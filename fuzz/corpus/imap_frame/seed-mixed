@@ -1,0 +1,5 @@
+a1 LOGIN {5}
+alice {3+}
+pwd
+a2 NOOP
+DONE

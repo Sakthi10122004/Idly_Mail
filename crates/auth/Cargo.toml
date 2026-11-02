@@ -1,0 +1,16 @@
+[package]
+name = "auth"
+description = "Account logins for Idly Mail: brute-force limits and SASL PLAIN, shared by SMTP, IMAP and JMAP"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+base64.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

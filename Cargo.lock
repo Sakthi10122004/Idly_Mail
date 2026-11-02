@@ -131,6 +131,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
+name = "auth"
+version = "0.0.1"
+dependencies = [
+ "base64 0.23.1",
+ "tokio",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1047,6 +1055,10 @@ dependencies = [
  "icu_normalizer",
  "icu_properties",
 ]
+
+[[package]]
+name = "imap-proto"
+version = "0.0.1"
 
 [[package]]
 name = "indexmap"
@@ -2118,6 +2130,7 @@ name = "smtp-server"
 version = "0.0.1"
 dependencies = [
  "argon2",
+ "auth",
  "base64 0.23.1",
  "dns",
  "mail-auth-glue",

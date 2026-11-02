@@ -283,7 +283,7 @@ pub struct Server<D, K, O, R> {
     tls: Option<Arc<rustls::ServerConfig>>,
     accounts: Option<Arc<dyn Accounts>>,
     dkim: Option<Arc<DkimKeys>>,
-    guard: auth::Guard,
+    guard: Arc<auth::Guard>,
     connections: Semaphore,
     submission_connections: Semaphore,
 }
@@ -302,7 +302,7 @@ impl<D: Directory, K: Sink, O: Observer, R: dns::Resolver + 'static> Server<D, K
     pub fn new(config: InboundConfig, directory: D, sink: K, observer: O, resolver: R) -> Self {
         let connections = Semaphore::new(config.max_connections);
         let submission_connections = Semaphore::new(config.max_submission_connections);
-        let guard = auth::Guard::new(config.auth_limits.clone());
+        let guard = Arc::new(auth::Guard::new(config.auth_limits.clone()));
         Self {
             config,
             directory,
@@ -327,6 +327,12 @@ impl<D: Directory, K: Sink, O: Observer, R: dns::Resolver + 'static> Server<D, K
     /// Enables AUTH (submission only) against these accounts.
     pub fn with_accounts(mut self, accounts: Arc<dyn Accounts>) -> Self {
         self.accounts = Some(accounts);
+        self
+    }
+
+    /// Shares brute-force counters with other protocols (IMAP, JMAP).
+    pub fn with_guard(mut self, guard: Arc<auth::Guard>) -> Self {
+        self.guard = guard;
         self
     }
 

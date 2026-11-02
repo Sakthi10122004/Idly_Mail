@@ -12,6 +12,7 @@ publish.workspace = true
 # server can only hand messages to a local Sink. See CLAUDE.md (no relays).
 [dependencies]
 smtp-proto.workspace = true
+auth.workspace = true
 queue.workspace = true
 dns.workspace = true
 mail-auth-glue.workspace = true

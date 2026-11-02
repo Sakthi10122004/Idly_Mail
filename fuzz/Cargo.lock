@@ -841,6 +841,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "imap-proto"
+version = "0.0.1"
+
+[[package]]
 name = "indexmap"
 version = "2.14.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1785,6 +1789,7 @@ version = "0.0.0"
 dependencies = [
  "acme",
  "dns",
+ "imap-proto",
  "libfuzzer-sys",
  "mail-auth-glue",
  "rcgen",

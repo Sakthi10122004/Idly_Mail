@@ -1,0 +1,15 @@
+[package]
+name = "imap-proto"
+description = "IMAP4rev2 (RFC 9051) command parser and response writer for Idly Mail (no I/O)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+# Sans-I/O and no dependencies (CLAUDE.md: protocol crates).
+[dependencies]
+
+[lints]
+workspace = true
