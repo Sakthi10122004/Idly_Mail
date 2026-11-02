@@ -259,6 +259,19 @@ grouped by development phase (see the roadmap in [README.md](README.md)).
     likely blocks port 25, and the warning says so.
   - The certificate expiring within 14 days.
   - Metrics: `idly_outbound_port25_open`, `idly_reverse_dns_problems`.
+- **Interop tests against Postfix** (`scripts/interop-test`, also run in
+  CI; needs Docker). Idly runs in the test process and Postfix in a
+  container pinned by digest. Four scenarios:
+  - submission → queue → Postfix over STARTTLS, with the DKIM signature
+    verified on the stored message;
+  - Postfix → Idly over STARTTLS, with SPF passing and Received and
+    Authentication-Results added;
+  - an unknown Postfix user bounces back to the sender as a DSN;
+  - a smuggling attempt is refused and nothing is stored.
+  See `tests/interop/README.md`.
+- **Crash test with the real binary:** `idly serve` is killed with
+  SIGKILL the moment it sends 250 for a submission. Afterwards the message
+  is still queued, DKIM-signed, and survives crash recovery.
 - **`idly queue list|retry <id>|drop <id>`**: list queued and held
   recipients (with a banner in test mode), retry a message now, or remove
   it without a bounce. These commands also work while `idly serve` runs.

@@ -17,6 +17,7 @@ use crate::guard;
 #[derive(Debug, Default)]
 pub struct Loopback {
     ports: HashMap<u16, u16>,
+    routes: HashMap<SocketAddr, u16>,
     attempts: Mutex<Vec<SocketAddr>>,
     connected: Mutex<Vec<(SocketAddr, Option<IpAddr>)>>,
 }
@@ -29,6 +30,14 @@ impl Loopback {
     /// Sends connections for port `from` to port `to` on 127.0.0.1.
     pub fn map(mut self, from: u16, to: u16) -> Self {
         self.ports.insert(from, to);
+        self
+    }
+
+    /// Sends connections for `addr` (say, a public address the test
+    /// resolver hands out) to `port` on 127.0.0.1, so several "port 25"
+    /// servers can coexist in one test. The guard still applies to `addr`.
+    pub fn route(mut self, addr: SocketAddr, port: u16) -> Self {
+        self.routes.insert(addr, port);
         self
     }
 
@@ -49,6 +58,17 @@ impl Dialer for Loopback {
             a.push(addr);
         }
         let ip = addr.ip();
+        if let Some(&port) = self.routes.get(&addr) {
+            if let Some(why) = guard::forbidden(ip) {
+                return Err(refused(ip, why));
+            }
+            if let Ok(mut c) = self.connected.lock() {
+                c.push((addr, source));
+            }
+            // The source address is ours to pick only on 127.0.0.1.
+            return connect_from(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port), None)
+                .await;
+        }
         if ip != IpAddr::V4(Ipv4Addr::LOCALHOST) {
             if let Some(why) = guard::forbidden(ip) {
                 return Err(refused(ip, why));

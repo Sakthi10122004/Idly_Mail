@@ -1031,6 +1031,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "interop"
+version = "0.0.1"
+dependencies = [
+ "base64 0.23.1",
+ "dns",
+ "mail-auth-glue",
+ "queue",
+ "rcgen",
+ "rustls",
+ "rustls-pki-types",
+ "smtp-client",
+ "smtp-proto",
+ "smtp-server",
+ "tempfile",
+ "tokio",
+ "tokio-rustls",
+]
+
+[[package]]
 name = "ipnet"
 version = "2.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

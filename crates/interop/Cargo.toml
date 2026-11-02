@@ -1,0 +1,29 @@
+[package]
+name = "interop"
+description = "Interoperability tests of Idly Mail against Postfix (Docker); test code only"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+smtp-proto.workspace = true
+smtp-server.workspace = true
+smtp-client = { workspace = true, features = ["testing"] }
+queue.workspace = true
+dns = { workspace = true, features = ["testing"] }
+mail-auth-glue.workspace = true
+tokio.workspace = true
+tokio-rustls.workspace = true
+rustls.workspace = true
+rustls-pki-types.workspace = true
+rcgen.workspace = true
+tempfile.workspace = true
+base64.workspace = true
+
+[lints]
+workspace = true

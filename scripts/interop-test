@@ -1,0 +1,7 @@
+#!/bin/sh
+# Builds the Postfix test peer (tests/interop/) and runs the interop tests
+# against it. Needs Docker. Usage: scripts/interop-test
+set -eu
+cd "$(dirname "$0")/.."
+docker build -q -t idly-interop-postfix tests/interop >/dev/null
+exec cargo test --locked -p interop -- --ignored --nocapture
