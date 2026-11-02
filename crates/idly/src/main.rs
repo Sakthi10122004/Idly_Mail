@@ -16,6 +16,7 @@ mod directory;
 mod dkim;
 mod metrics;
 mod outbound;
+mod tlsrpt;
 
 use config::{Config, LogFormat};
 
@@ -331,7 +332,9 @@ async fn start(config: &Config, metrics: Arc<metrics::Metrics>) -> std::io::Resu
     for d in &dkim.unsigned {
         tracing::warn!(domain = %d, "no DKIM key and allow_unsigned is set: this domain's mail is sent unsigned and will fail DMARC at most receivers");
     }
-    let dkim = dkim.keys;
+    let dkim = Arc::new(dkim.keys);
+    // dkim::load made sure this domain has a key.
+    let report_domain = config.tls_reporting.report_domain();
 
     let test_mode_allow = config.test_mode.enabled.then(|| {
         config
@@ -361,14 +364,44 @@ async fn start(config: &Config, metrics: Arc<metrics::Metrics>) -> std::io::Resu
     client_config.families = families;
     client_config.sources = sources;
     client_config.test_mode_allow = test_mode_allow.clone();
-    let client = smtp_client::Client::new(
-        client_config,
-        resolver.clone(),
-        smtp_client::Direct,
-        Arc::new(queue::SystemClock),
+    client_config.tls_reporting = report_domain.is_some();
+    // MTA-STS policies and TLS report data survive restarts.
+    let state = Arc::new(
+        smtp_client::State::open(&data.join("outbound.db"))
+            .map_err(|e| other("outbound.db", &e))?,
     );
-    let runner = queue::Runner::new(queue.clone(), client, hostname);
+    let client = |config| {
+        smtp_client::Client::new(
+            config,
+            resolver.clone(),
+            smtp_client::Direct,
+            Arc::new(queue::SystemClock),
+        )
+        .with_state(state.clone())
+    };
+    let runner = queue::Runner::new(queue.clone(), client(client_config.clone()), hostname);
     tokio::spawn(runner.run(Duration::from_secs(30)));
+    if let (Some(domain), Some(from)) = (report_domain, &config.tls_reporting.from) {
+        let reporter = smtp_client::tlsrpt::Reporter {
+            organization: config
+                .tls_reporting
+                .organization
+                .clone()
+                .unwrap_or_else(|| hostname.clone()),
+            contact: from.clone(),
+            hostname: hostname.clone(),
+        };
+        let reports = client(client_config);
+        let mail = tlsrpt::mailer(queue.clone(), dkim.clone(), domain);
+        tracing::info!(from = %from, "TLS reporting (RFC 8460) is on");
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(tlsrpt::INTERVAL);
+            loop {
+                tick.tick().await;
+                reports.send_tls_reports(&reporter, &mail).await;
+            }
+        });
+    }
 
     let mut listen_config = listener_config(config, true);
     listen_config.test_mode_allow = test_mode_allow;
@@ -385,7 +418,7 @@ async fn start(config: &Config, metrics: Arc<metrics::Metrics>) -> std::io::Resu
         resolver,
     )
     .with_accounts(Arc::new(accounts))
-    .with_dkim(Arc::new(dkim));
+    .with_dkim(dkim);
     if let Some(tls) = &tls {
         server = server.with_tls(tls.clone());
     }

@@ -135,9 +135,9 @@ Principle: **lenient on harmless syntax, strict on framing.**
   (`smtp-client`'s `route`). No config key or flag may name a delivery host.
 - Outbound connections only ever go to public unicast addresses
   (`smtp_client::guard`, enforced inside the production `Direct` dialer,
-  for SMTP and MTA-STS fetches alike). Tests reach 127.0.0.1 only through
-  the `Loopback` dialer of the dev-only `testing` feature, never a config
-  key.
+  for SMTP, MTA-STS fetches and TLS report uploads alike). Tests reach
+  127.0.0.1 only through the `Loopback` dialer of the dev-only `testing`
+  feature, never a config key.
   `--test-mode` can only *restrict* delivery to an allow-list.
 
 ## Inbound authentication handling (maintainer-approved, milestone 6 implements)

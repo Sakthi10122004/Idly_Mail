@@ -167,6 +167,15 @@ pub(crate) fn load(config: &Config) -> Result<Loaded, String> {
             list.concat()
         ));
     }
+    // RFC 8460 §3: TLS report mail must be DKIM-signed by the reporting
+    // domain, so allow_unsigned doesn't help there.
+    if let Some(d) = config.tls_reporting.report_domain()
+        && !keys.has(&d)
+    {
+        return Err(format!(
+            "tls_reporting.from: {d} has no DKIM key, and TLS reports must be DKIM-signed; run `idly dkim generate --domain {d} --selector <name>`"
+        ));
+    }
     Ok(Loaded { keys, unsigned })
 }
 
@@ -243,5 +252,19 @@ mod tests {
         // An empty key directory counts as missing too.
         std::fs::create_dir_all(tmp.path().join("dkim/example.org")).unwrap();
         assert!(load(&config_for(tmp.path(), false)).is_err());
+    }
+
+    #[test]
+    fn tls_reports_need_a_signing_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        generate(tmp.path(), "signed.example", "s", Algorithm::Ed25519).unwrap();
+        let mut config = config_for(tmp.path(), true);
+        config.tls_reporting.enabled = true;
+        config.tls_reporting.from = Some("tlsrpt@example.org".into());
+        // example.org may send unsigned mail, but not unsigned reports.
+        let err = load(&config).unwrap_err();
+        assert!(err.contains("tls_reporting.from"), "{err}");
+        config.tls_reporting.from = Some("tlsrpt@signed.example".into());
+        load(&config).unwrap();
     }
 }

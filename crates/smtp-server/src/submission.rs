@@ -35,6 +35,21 @@ impl DkimKeys {
         self.by_domain.contains_key(domain)
     }
 
+    /// `message` with DKIM-Signature fields from every key of `domain`
+    /// prepended, or None if the domain has no key or signing failed.
+    pub fn sign_message(&self, domain: &str, message: &[u8], now: u64) -> Option<Vec<u8>> {
+        let signatures = self.sign(domain, message, now);
+        if signatures.is_empty() {
+            return None;
+        }
+        let mut out = Vec::with_capacity(message.len() + 1024);
+        for s in signatures {
+            out.extend_from_slice(s.as_bytes());
+        }
+        out.extend_from_slice(message);
+        Some(out)
+    }
+
     fn sign(&self, domain: &str, message: &[u8], now: u64) -> Vec<String> {
         let Some(signers) = self.by_domain.get(domain) else {
             return Vec::new();

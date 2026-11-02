@@ -39,6 +39,7 @@ struct Call {
     sender: Option<String>,
     recipients: Vec<String>,
     message: Vec<u8>,
+    kind: Kind,
 }
 
 /// Records attempts; answers per domain from a script (default: delivered).
@@ -55,12 +56,14 @@ impl Connector for Arc<FakeConnector> {
         sender: Option<&str>,
         recipients: &[String],
         message: &[u8],
+        kind: Kind,
     ) -> Vec<Outcome> {
         self.calls.lock().unwrap().push(Call {
             domain: domain.into(),
             sender: sender.map(Into::into),
             recipients: recipients.to_vec(),
             message: message.to_vec(),
+            kind,
         });
         let outcome = self
             .script
@@ -166,6 +169,7 @@ async fn crash_after_spool_write_before_commit() {
         Some("alice@example.org"),
         &rcpts(&["bob@example.net"]),
         MSG,
+        Kind::Mail,
         Some(CrashPoint::AfterSpoolWrite),
     );
     assert!(matches!(r, Err(QueueError::Crashed)));
@@ -200,6 +204,7 @@ async fn crash_after_commit_before_reply() {
         Some("alice@example.org"),
         &rcpts(&["bob@example.net"]),
         MSG,
+        Kind::Mail,
         Some(CrashPoint::AfterDbCommit),
     );
     assert!(matches!(r, Err(QueueError::Crashed)));
@@ -457,4 +462,56 @@ fn retry_schedule() {
     let c = QueueConfig::new("x");
     let delays: Vec<u64> = (1..=8).map(|a| c.retry_delay(a)).collect();
     assert_eq!(delays, [300, 600, 1200, 2400, 4800, 14_400, 14_400, 14_400]);
+}
+
+#[tokio::test]
+async fn message_kind_reaches_the_connector() {
+    let h = Harness::new();
+    let q = h.open();
+    let c = Arc::new(FakeConnector::default());
+    q.enqueue(None, &rcpts(&["a@example.net"]), MSG).unwrap();
+    q.enqueue_kind(None, &rcpts(&["b@example.com"]), MSG, Kind::TlsReport)
+        .unwrap();
+    runner(&q, &c).run_once().await;
+    let mut kinds: Vec<(String, Kind)> =
+        c.calls().into_iter().map(|c| (c.domain, c.kind)).collect();
+    kinds.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(
+        kinds,
+        [
+            ("example.com".into(), Kind::TlsReport),
+            ("example.net".into(), Kind::Mail)
+        ]
+    );
+}
+
+#[tokio::test]
+async fn older_databases_gain_the_kind_column() {
+    let h = Harness::new();
+    {
+        // The milestone 5 schema, with one queued message.
+        let db = Connection::open(h.dir.path().join("queue.db")).unwrap();
+        db.execute_batch(
+            "CREATE TABLE messages (id TEXT PRIMARY KEY, sender TEXT,
+                 arrival INTEGER NOT NULL, size INTEGER NOT NULL);
+             INSERT INTO messages VALUES ('old1', NULL, 0, 3);",
+        )
+        .unwrap();
+        std::fs::create_dir_all(h.dir.path().join("spool")).unwrap();
+        std::fs::write(h.dir.path().join("spool/old1.eml"), MSG).unwrap();
+    }
+    let q = h.open();
+    q.db()
+        .execute(
+            "INSERT INTO recipients (message_id, address, domain, status, next_attempt)
+             VALUES ('old1', 'x@example.net', 'example.net', 'queued', 0)",
+            [],
+        )
+        .unwrap();
+    let c = Arc::new(FakeConnector::default());
+    runner(&q, &c).run_once().await;
+    assert_eq!(c.calls()[0].kind, Kind::Mail);
+    // Opening again doesn't try to add the column twice.
+    drop(q);
+    h.open();
 }

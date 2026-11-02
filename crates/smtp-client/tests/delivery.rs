@@ -1139,3 +1139,445 @@ async fn test_mode_through_the_queue_runner() {
     let entries = q.list().unwrap();
     assert_eq!(entries[0].status, "held");
 }
+
+// ---------------------------------------------------------------- TLS reporting (RFC 8460)
+
+/// Noon UTC on 2026-11-01.
+const DAY_NOON: u64 = 1_793_491_200 + 43_200;
+/// 2026-11-02, after every possible report delay (at most 4 h).
+const NEXT_DAY_LATE: u64 = 1_793_577_600 + 14_401;
+
+type Mailed = Arc<Mutex<Vec<(Vec<String>, Vec<u8>)>>>;
+
+fn reporter() -> smtp_client::tlsrpt::Reporter {
+    smtp_client::tlsrpt::Reporter {
+        organization: "Example Org".into(),
+        contact: "tlsrpt@example.org".into(),
+        hostname: "out.example.org".into(),
+    }
+}
+
+/// A client sharing `state`, counting TLS results.
+fn reporting(
+    resolver: StaticResolver,
+    smtp_port: u16,
+    state: &Arc<smtp_client::State>,
+    clock: &Arc<ManualClock>,
+) -> Client<StaticResolver, Loopback> {
+    client(
+        resolver,
+        Loopback::new().map(25, smtp_port),
+        Arc::new(RootCertStore::empty()),
+        clock.clone(),
+        |c| c.tls_reporting = true,
+    )
+    .with_state(state.clone())
+}
+
+/// Runs the report pass and returns the mail it queued.
+async fn send_reports<D: Dialer>(c: &Client<StaticResolver, D>) -> Vec<(Vec<String>, Vec<u8>)> {
+    let mailed: Mailed = Arc::default();
+    let m = mailed.clone();
+    c.send_tls_reports(&reporter(), move |to, msg| {
+        m.lock().unwrap().push((to, msg));
+        Ok(())
+    })
+    .await;
+    mailed.lock().unwrap().clone()
+}
+
+/// The JSON report inside a report email.
+fn report_json(msg: &[u8]) -> serde_json::Value {
+    use base64::Engine as _;
+    let text = String::from_utf8(msg.to_vec()).unwrap();
+    let b64: String = text
+        .split(".json.gz\"\r\n\r\n")
+        .nth(1)
+        .unwrap()
+        .split("--")
+        .next()
+        .unwrap()
+        .split_whitespace()
+        .collect();
+    let gz = base64::engine::general_purpose::STANDARD
+        .decode(b64)
+        .unwrap();
+    gunzip(&gz)
+}
+
+fn gunzip(gz: &[u8]) -> serde_json::Value {
+    use std::io::Read as _;
+    let mut json = String::new();
+    flate2::read::GzDecoder::new(gz)
+        .read_to_string(&mut json)
+        .unwrap();
+    serde_json::from_str(&json).unwrap()
+}
+
+fn policy_of<'a>(report: &'a serde_json::Value, kind: &str, n: usize) -> &'a serde_json::Value {
+    report["policies"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|p| p["policy"]["policy-type"] == kind)
+        .nth(n)
+        .unwrap_or_else(|| panic!("no policy {kind} #{n} in {report:#}"))
+}
+
+#[tokio::test]
+async fn tls_results_are_counted_and_reported_by_mail() {
+    let state = Arc::new(smtp_client::State::in_memory().unwrap());
+    let clock = Arc::new(ManualClock(AtomicU64::new(DAY_NOON)));
+    let to = rcpts(&["a@example.com"]);
+
+    // DANE: one session matches, one doesn't.
+    let (tls, spki) = self_signed(&["mx.example.com"]);
+    let (port, _) = fake_mx(Script {
+        tls: Some(tls),
+        ..Script::default()
+    })
+    .await;
+    let good = reporting(dane_zone(tlsa(3, 1, spki)), port, &state, &clock);
+    assert_eq!(
+        good.deliver_to("example.com", None, &to, MSG).await,
+        vec![Outcome::Delivered]
+    );
+    let bad = reporting(dane_zone(tlsa(3, 1, vec![9])), port, &state, &clock);
+    assert_eq!(
+        status(&bad.deliver_to("example.com", None, &to, MSG).await[0]),
+        "temporary"
+    );
+    // No policy: opportunistic TLS works once; a server without STARTTLS.
+    let opportunistic = reporting(zone(), port, &state, &clock);
+    opportunistic
+        .deliver_to("example.com", None, &to, MSG)
+        .await;
+    let (plain_port, _) = fake_mx(Script::default()).await;
+    let plain = reporting(zone(), plain_port, &state, &clock);
+    plain.deliver_to("example.com", None, &to, MSG).await;
+
+    let sender = reporting(
+        zone().with_txt(
+            "_smtp._tls.example.com",
+            "v=TLSRPTv1; rua=mailto:rua@example.com",
+        ),
+        port,
+        &state,
+        &clock,
+    );
+    // Not yet: the day isn't over.
+    assert!(send_reports(&sender).await.is_empty());
+    clock.0.store(NEXT_DAY_LATE, Ordering::SeqCst);
+    let mailed = send_reports(&sender).await;
+    assert_eq!(mailed.len(), 1);
+    let (rcpt, msg) = &mailed[0];
+    assert_eq!(rcpt, &["rua@example.com".to_owned()]);
+    let text = String::from_utf8_lossy(msg);
+    assert!(
+        text.contains("TLS-Report-Domain: example.com\r\n"),
+        "{text}"
+    );
+
+    let report = report_json(msg);
+    assert_eq!(report["report-id"], "20261101.example.com@out.example.org");
+    assert_eq!(report["policies"].as_array().unwrap().len(), 3);
+    let mut dane: Vec<&serde_json::Value> = (0..2).map(|i| policy_of(&report, "tlsa", i)).collect();
+    dane.sort_by_key(|p| p["summary"]["total-successful-session-count"].as_u64());
+    assert_eq!(dane[0]["summary"]["total-failure-session-count"], 1);
+    assert_eq!(dane[0]["policy"]["mx-host"], "mx.example.com");
+    assert_eq!(
+        dane[0]["policy"]["policy-string"][0],
+        format!("3 1 1 {}", hex(&sha256(&[9])))
+    );
+    let d = &dane[0]["failure-details"][0];
+    assert_eq!(d["result-type"], "validation-failure");
+    assert_eq!(d["receiving-mx-hostname"], "mx.example.com");
+    assert_eq!(d["receiving-ip"], "127.0.0.1");
+    assert_eq!(d["sending-mta-ip"], "127.0.0.1");
+    assert!(d["failure-reason-code"].as_str().unwrap().contains("DANE"));
+    assert_eq!(dane[1]["summary"]["total-successful-session-count"], 1);
+    assert_eq!(dane[1]["summary"]["total-failure-session-count"], 0);
+    let none = policy_of(&report, "no-policy-found", 0);
+    assert_eq!(none["summary"]["total-successful-session-count"], 1);
+    assert_eq!(none["summary"]["total-failure-session-count"], 1);
+    assert_eq!(
+        none["failure-details"][0]["result-type"],
+        "starttls-not-supported"
+    );
+
+    // Sent once.
+    assert!(send_reports(&sender).await.is_empty());
+}
+
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02X}")).collect()
+}
+
+#[tokio::test]
+async fn domains_without_a_tlsrpt_record_get_no_report() {
+    let state = Arc::new(smtp_client::State::in_memory().unwrap());
+    let clock = Arc::new(ManualClock(AtomicU64::new(DAY_NOON)));
+    let (port, _) = fake_mx(Script::default()).await;
+    let c = reporting(zone(), port, &state, &clock);
+    c.deliver_to("example.com", None, &rcpts(&["a@example.com"]), MSG)
+        .await;
+    clock.0.store(NEXT_DAY_LATE, Ordering::SeqCst);
+    assert!(send_reports(&c).await.is_empty());
+    // The results are dropped, not kept for later.
+    let late = reporting(
+        zone().with_txt(
+            "_smtp._tls.example.com",
+            "v=TLSRPTv1; rua=mailto:rua@example.com",
+        ),
+        port,
+        &state,
+        &clock,
+    );
+    assert!(send_reports(&late).await.is_empty());
+}
+
+#[tokio::test]
+async fn tls_reports_are_delivered_despite_tls_failures_and_not_counted() {
+    // RFC 8460 §3: report mail goes out even when the DANE check fails,
+    // and its session isn't in the next report.
+    let state = Arc::new(smtp_client::State::in_memory().unwrap());
+    let clock = Arc::new(ManualClock(AtomicU64::new(DAY_NOON)));
+    let (tls, _) = self_signed(&["mx.example.com"]);
+    let (port, log) = fake_mx(Script {
+        tls: Some(tls),
+        ..Script::default()
+    })
+    .await;
+    let resolver = dane_zone(tlsa(3, 1, vec![9])).with_txt(
+        "_smtp._tls.example.com",
+        "v=TLSRPTv1; rua=mailto:rua@example.com",
+    );
+    let c = reporting(resolver, port, &state, &clock);
+    let out = c
+        .deliver_kind(
+            "example.com",
+            None,
+            &rcpts(&["rua@example.com"]),
+            MSG,
+            queue::Kind::TlsReport,
+        )
+        .await;
+    assert_eq!(out, vec![Outcome::Delivered]);
+    assert!(log.lock().unwrap()[0].tls, "still encrypted when possible");
+    clock.0.store(NEXT_DAY_LATE, Ordering::SeqCst);
+    assert!(send_reports(&c).await.is_empty(), "nothing was counted");
+}
+
+#[tokio::test]
+async fn mta_sts_testing_delivers_but_reports_the_failure() {
+    let policy = "version: STSv1\r\nmode: testing\r\nmx: mx.example.com\r\nmax_age: 86400\r\n";
+    let s = sts(200, "text/plain", policy).await;
+    // The MX certificate isn't trusted.
+    let (mx_tls, _) = self_signed(&["mx.example.com"]);
+    let (port, log) = fake_mx(Script {
+        tls: Some(mx_tls),
+        ..Script::default()
+    })
+    .await;
+    let state = Arc::new(smtp_client::State::in_memory().unwrap());
+    let clock = Arc::new(ManualClock(AtomicU64::new(DAY_NOON)));
+    let resolver = sts_zone("t1").with_txt(
+        "_smtp._tls.example.com",
+        "v=TLSRPTv1; rua=mailto:rua@example.com",
+    );
+    let c = client(
+        resolver,
+        Loopback::new().map(25, port).map(443, s.https.port),
+        s.pki.roots(),
+        clock.clone(),
+        |c| c.tls_reporting = true,
+    )
+    .with_state(state);
+    let out = c
+        .deliver_to("example.com", None, &rcpts(&["a@example.com"]), MSG)
+        .await;
+    assert_eq!(out, vec![Outcome::Delivered]);
+    assert!(log.lock().unwrap()[0].tls);
+    clock.0.store(NEXT_DAY_LATE, Ordering::SeqCst);
+    let mailed = send_reports(&c).await;
+    let report = report_json(&mailed[0].1);
+    let p = policy_of(&report, "sts", 0);
+    assert_eq!(p["policy"]["policy-string"][1], "mode: testing");
+    assert_eq!(p["policy"]["mx-host"][0], "mx.example.com");
+    assert_eq!(p["summary"]["total-failure-session-count"], 1);
+    assert_eq!(
+        p["failure-details"][0]["result-type"],
+        "certificate-not-trusted"
+    );
+}
+
+#[tokio::test]
+async fn mta_sts_policies_survive_a_restart() {
+    let s = sts(200, "text/plain", POLICY_ENFORCE).await;
+    let (mx_tls, _, _) = s.pki.server(&["mx.example.com"]);
+    let (port, _) = fake_mx(Script {
+        tls: Some(mx_tls),
+        ..Script::default()
+    })
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("outbound.db");
+    let clock = Arc::new(ManualClock(AtomicU64::new(DAY_NOON)));
+    let to = rcpts(&["a@example.com"]);
+    {
+        let state = Arc::new(smtp_client::State::open(&path).unwrap());
+        let c = sts_client(sts_zone("p1"), &s, port, clock.clone()).with_state(state);
+        assert_eq!(
+            c.deliver_to("example.com", None, &to, MSG).await,
+            vec![Outcome::Delivered]
+        );
+    }
+    assert_eq!(s.https.requests.load(Ordering::SeqCst), 1);
+    // Restarted, and the policy host is now down: the saved policy is used
+    // without a fetch, so it is still enforced.
+    s.https.body.lock().unwrap().0 = 500;
+    let state = Arc::new(smtp_client::State::open(&path).unwrap());
+    let c = sts_client(sts_zone("p1"), &s, port, clock.clone()).with_state(state);
+    assert_eq!(
+        c.deliver_to("example.com", None, &to, MSG).await,
+        vec![Outcome::Delivered]
+    );
+    assert_eq!(
+        s.https.requests.load(Ordering::SeqCst),
+        1,
+        "no fetch after restart"
+    );
+    // An MX outside the restored policy is still refused.
+    let other = StaticResolver::new()
+        .with_txt("_mta-sts.example.com", "v=STSv1; id=p1")
+        .with_mx("example.com", 10, "evil.example.net")
+        .with_ip("evil.example.net", ip("127.0.0.1"));
+    let state = Arc::new(smtp_client::State::open(&path).unwrap());
+    let c = sts_client(other, &s, port, clock).with_state(state);
+    assert_eq!(
+        status(&c.deliver_to("example.com", None, &to, MSG).await[0]),
+        "temporary"
+    );
+}
+
+/// A recorded POST: (path, content type, body).
+type Post = (String, String, Vec<u8>);
+
+/// A fake report receiver: records POSTs, answers with `status`.
+#[derive(Clone)]
+struct Sink {
+    port: u16,
+    status: Arc<std::sync::atomic::AtomicU16>,
+    posts: Arc<Mutex<Vec<Post>>>,
+}
+
+async fn report_sink(tls: Arc<ServerConfig>) -> Sink {
+    use http_body_util::BodyExt as _;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let sink = Sink {
+        port: listener.local_addr().unwrap().port(),
+        status: Arc::new(std::sync::atomic::AtomicU16::new(200)),
+        posts: Arc::default(),
+    };
+    let srv = sink.clone();
+    tokio::spawn(async move {
+        while let Ok((s, _)) = listener.accept().await {
+            let acceptor = tokio_rustls::TlsAcceptor::from(tls.clone());
+            let srv = srv.clone();
+            tokio::spawn(async move {
+                let Ok(s) = acceptor.accept(s).await else {
+                    return;
+                };
+                let service = hyper::service::service_fn(
+                    move |req: hyper::Request<hyper::body::Incoming>| {
+                        let srv = srv.clone();
+                        async move {
+                            let path = req.uri().to_string();
+                            let ct = req
+                                .headers()
+                                .get("content-type")
+                                .map(|v| v.to_str().unwrap().to_owned())
+                                .unwrap_or_default();
+                            assert_eq!(req.method(), hyper::Method::POST);
+                            let body = req.into_body().collect().await.unwrap().to_bytes();
+                            srv.posts.lock().unwrap().push((path, ct, body.to_vec()));
+                            Ok::<_, Infallible>(
+                                hyper::Response::builder()
+                                    .status(srv.status.load(Ordering::SeqCst))
+                                    .body(Full::new(Bytes::new()))
+                                    .unwrap(),
+                            )
+                        }
+                    },
+                );
+                let _ = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(hyper_util::rt::TokioIo::new(s), service)
+                    .await;
+            });
+        }
+    });
+    sink
+}
+
+#[tokio::test]
+async fn tls_reports_are_uploaded_over_https_with_retries() {
+    let pki = Pki::new();
+    let (tls, _, _) = pki.server(&["reports.example.net"]);
+    let sink = report_sink(tls).await;
+    sink.status.store(503, Ordering::SeqCst);
+    let (port, _) = fake_mx(Script::default()).await;
+    let state = Arc::new(smtp_client::State::in_memory().unwrap());
+    let clock = Arc::new(ManualClock(AtomicU64::new(DAY_NOON)));
+    let resolver = zone()
+        .with_txt(
+            "_smtp._tls.example.com",
+            "v=TLSRPTv1; rua=https://reports.example.net/v1/tlsrpt,https://internal.example.net/r",
+        )
+        .with_ip("reports.example.net", ip("127.0.0.1"))
+        // A report destination on a private address is never contacted.
+        .with_ip("internal.example.net", ip("10.0.0.7"));
+    let c = client(
+        resolver,
+        Loopback::new().map(25, port).map(443, sink.port),
+        pki.roots(),
+        clock.clone(),
+        |c| c.tls_reporting = true,
+    )
+    .with_state(state);
+    c.deliver_to("example.com", None, &rcpts(&["a@example.com"]), MSG)
+        .await;
+    clock.0.store(NEXT_DAY_LATE, Ordering::SeqCst);
+    assert!(send_reports(&c).await.is_empty(), "no mailto destination");
+    assert_eq!(sink.posts.lock().unwrap().len(), 1, "tried once, refused");
+    // Retried after the back-off, and accepted.
+    sink.status.store(201, Ordering::SeqCst);
+    send_reports(&c).await;
+    assert_eq!(
+        sink.posts.lock().unwrap().len(),
+        1,
+        "not before the back-off"
+    );
+    clock.0.fetch_add(300, Ordering::SeqCst);
+    send_reports(&c).await;
+    let posts = sink.posts.lock().unwrap().clone();
+    assert_eq!(posts.len(), 2);
+    let (path, ct, body) = &posts[1];
+    assert_eq!(
+        (path.as_str(), ct.as_str()),
+        ("/v1/tlsrpt", "application/tlsrpt+gzip")
+    );
+    assert_eq!(
+        gunzip(body)["report-id"],
+        "20261101.example.com@out.example.org"
+    );
+    // Done: no further uploads.
+    clock.0.fetch_add(100_000, Ordering::SeqCst);
+    send_reports(&c).await;
+    assert_eq!(sink.posts.lock().unwrap().len(), 2);
+    let private = SocketAddr::new(ip("10.0.0.7"), 443);
+    assert!(c.dialer().attempts().contains(&private), "it was asked for");
+    assert!(
+        c.dialer().connected().iter().all(|(a, _)| *a != private),
+        "but the guard opened no connection"
+    );
+}

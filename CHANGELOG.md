@@ -182,8 +182,35 @@ grouped by development phase (see the roadmap in [README.md](README.md)).
     read, so a large batch can't deadlock. If the server answers DATA
     with 354 although no recipient was accepted, Idly sends a lone "."
     and sends no message.
+  - **MTA-STS `testing` policies** are now checked like `enforce` ones,
+    but a failure is only reported, never blocks delivery (RFC 8461 §5).
   - The queue now delivers: every 30 seconds it hands due messages to the
     client.
+- **MTA-STS policies survive restarts:** they are kept in
+  `<data_dir>/outbound.db` and reloaded at startup while within their
+  `max_age`, so a restart doesn't open a window where an attacker who
+  blocks the policy fetch could strip TLS.
+- **SMTP TLS Reporting** (RFC 8460), off by default; turn it on with
+  `[tls_reporting] enabled = true` and a `from` address:
+  - Every outbound session's TLS result is counted per recipient domain
+    and policy: DANE (TLSA), MTA-STS, or none. Failures carry an RFC 8460
+    result type such as `starttls-not-supported`, `certificate-expired`,
+    `certificate-host-mismatch`, `certificate-not-trusted`,
+    `tlsa-invalid`, `dnssec-invalid` or `sts-policy-fetch-error`, plus
+    both IP addresses and the error text.
+  - For each domain with a `_smtp._tls` TXT record, a report covering the
+    previous UTC day is sent 0–4 hours after midnight UTC: gzipped JSON,
+    by email (multipart/report, DKIM-signed with the `from` domain's
+    keys, null sender) and/or HTTPS POST (retried with back-off for 24
+    hours). Domains without the record get nothing, and their counts are
+    dropped.
+  - Report mail is delivered even when the recipient's DANE or MTA-STS
+    check fails, as RFC 8460 §3 requires, and isn't counted in the next
+    report. The queue records each message's kind for this.
+  - `from` must be at one of the `[[domain]]` entries and that domain must
+    have a DKIM key (`allow_unsigned` doesn't apply); otherwise
+    `check-config` and `serve` refuse to start.
+- **Fuzz target** `tlsrpt` (the `_smtp._tls` record and its URIs).
 - **`server.outbound_ips`**: the addresses outbound mail is sent from, at
   most one IPv4 and one IPv6. At startup, each must be assigned to the
   server and have a PTR record naming `server.hostname` that resolves
@@ -233,6 +260,10 @@ grouped by development phase (see the roadmap in [README.md](README.md)).
   crate (the static test resolver, the loopback test dialer) is enabled
   in `idly`'s normal dependency tree.
 
+- **The DKIM signer also signs `TLS-Report-Domain`,
+  `TLS-Report-Submitter` and `Auto-Submitted`** when present (RFC 8460
+  §5.3).
+
 #### Fixed
 - **DNSSEC answers from zones signed with several keys came out as
   insecure.** For example, Debian's DANE records were affected, so DANE
@@ -240,6 +271,14 @@ grouped by development phase (see the roadmap in [README.md](README.md)).
   decide the result; unused signatures are ignored.
 
 #### Security
+- **TLS report destinations are restricted.** HTTPS uploads go only to a
+  DNS name on port 443 (no address literals, other ports or user info),
+  through the same address guard as SMTP, with the certificate always
+  checked; RFC 8460 allows skipping that check, Idly doesn't. Mail
+  destinations must be domain addresses. At most 4 destinations per
+  domain, and the stored counts are capped (50,000 rows per day, 10,000
+  pending uploads), so hostile DNS can't make Idly connect anywhere
+  private or grow its state without bound.
 - **The `rsa` crate (advisory RUSTSEC-2023-0071) is used only to generate
   DKIM keys offline.** All signing and verification uses `ring`, and
   `clippy.toml` forbids the `rsa` crate's signing and decryption functions.

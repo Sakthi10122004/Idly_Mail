@@ -34,6 +34,9 @@ pub struct Policy {
     pub mx: Vec<String>,
     /// Seconds the policy may be cached, at most one year.
     pub max_age: u64,
+    /// The policy's non-empty lines as served, for TLS reports
+    /// (RFC 8460 §4.5) and the persistent cache.
+    pub lines: Vec<String>,
 }
 
 /// The policy id from the `_mta-sts` TXT records (RFC 8461 §3.1), if there
@@ -94,11 +97,13 @@ pub fn parse_policy(text: &str) -> Option<Policy> {
     let mut mode = None;
     let mut max_age = None;
     let mut mx = Vec::new();
+    let mut lines = Vec::new();
     for line in text.split('\n') {
         let line = line.strip_suffix('\r').unwrap_or(line);
         if line.is_empty() {
             continue;
         }
+        lines.push(line.to_owned());
         let (key, value) = line.split_once(':')?;
         let value = value.trim_matches([' ', '\t']);
         match key {
@@ -148,6 +153,7 @@ pub fn parse_policy(text: &str) -> Option<Policy> {
         mode,
         mx,
         max_age: max_age?,
+        lines,
     })
 }
 
@@ -199,6 +205,26 @@ pub struct Cache {
 impl Cache {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Restores a policy saved earlier (see [`crate::state`]): kept only if
+    /// it is still within its max_age.
+    pub fn restore(&self, domain: &str, id: &str, policy: Policy, fetched: u64, now: u64) {
+        let entry = Entry {
+            id: id.to_owned(),
+            policy,
+            fetched,
+        };
+        if !entry.valid(now) {
+            return;
+        }
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if entries.len() < MAX_CACHED {
+            entries.insert(domain.to_owned(), entry);
+        }
     }
 
     /// Decides what to do for `domain` whose TXT record gave `txt_id`.
@@ -321,6 +347,8 @@ mod tests {
             ["mail.example.com", "*.example.net", "backupmx.example.com"]
         );
         assert_eq!(p.max_age, 604_800);
+        assert_eq!(p.lines.len(), 6);
+        assert_eq!(p.lines[0], "version: STSv1");
         // LF line endings, unknown keys, a huge max_age.
         let p = parse_policy(
             "version: STSv1\nmode: testing\nmx: MX.Example.COM.\nfoo: bar\nmax_age: 9999999999\n",
@@ -360,6 +388,7 @@ mod tests {
             mode: Mode::Enforce,
             mx: vec!["mx.example.com".into()],
             max_age,
+            lines: Vec::new(),
         }
     }
 

@@ -1,0 +1,12 @@
+@220 mx ESMTP
+250-mx
+250-PIPELINING
+250 8BITMIME
+250 ok
+250 ok
+550-5.1.1 no
+550 5.1.1 really
+250 ok
+354 go
+250 queued
+221 bye

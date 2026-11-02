@@ -70,6 +70,16 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$REPLACEMEREPLAC
 enabled = false
 allow_domains = []
 
+# Daily SMTP TLS reports (RFC 8460): for each domain that publishes a
+# _smtp._tls TXT record, a summary of the TLS results of the previous day's
+# deliveries, sent a few hours after midnight UTC by email (DKIM-signed) or
+# HTTPS. `from` is the contact address and the sender; its domain must be
+# one of the [[domain]] entries and have a DKIM key.
+[tls_reporting]
+enabled = false
+# from = "tlsrpt@example.org"
+# organization = "Example Org"   # default: server.hostname
+
 [log]
 format = "json"   # or "text" for a terminal
 level = "info"

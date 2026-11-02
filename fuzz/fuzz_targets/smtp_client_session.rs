@@ -76,7 +76,7 @@ fuzz_target!(|input: &[u8]| {
             };
             tokio::join!(write, read);
         };
-        let (end, ()) = tokio::time::timeout(Duration::from_secs(60), async {
+        let ((end, _tls), ()) = tokio::time::timeout(Duration::from_secs(60), async {
             tokio::join!(client, fake_server)
         })
         .await

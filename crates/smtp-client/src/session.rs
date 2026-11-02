@@ -115,6 +115,26 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for Stream<S> {
     }
 }
 
+/// What happened with TLS on a connection, for TLS reports (RFC 8460).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TlsSeen {
+    /// TLS wasn't attempted, or the session ended before it could be
+    /// (including transient trouble such as a timed-out handshake,
+    /// which RFC 8460 §4.3.4 does not require reporting).
+    NotTried,
+    /// The server didn't offer STARTTLS.
+    NotOffered,
+    /// The server refused the STARTTLS command; the reply.
+    Refused(String),
+    /// The TLS handshake completed.
+    Established,
+    /// The handshake failed: an RFC 8460 §4.3 result type and the error.
+    Failed {
+        result_type: &'static str,
+        reason: String,
+    },
+}
+
 /// Why the conversation stopped early.
 #[derive(Debug)]
 enum Stop {
@@ -125,6 +145,7 @@ enum Stop {
 struct Conversation<S> {
     stream: Stream<S>,
     buf: Vec<u8>,
+    tls: TlsSeen,
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin> Conversation<S> {
@@ -221,9 +242,20 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Conversation<S> {
         match timeout(TLS_TIMEOUT, connector.connect(name, plain)).await {
             Ok(Ok(tls)) => {
                 self.stream = Stream::Tls(Box::new(tls));
+                self.tls = TlsSeen::Established;
                 Ok(())
             }
-            Ok(Err(e)) => Err(Stop::TlsHandshake(format!("TLS handshake failed: {e}"))),
+            Ok(Err(e)) => {
+                let result_type = e
+                    .get_ref()
+                    .and_then(|i| i.downcast_ref::<rustls::Error>())
+                    .map_or("validation-failure", crate::tls::result_type);
+                self.tls = TlsSeen::Failed {
+                    result_type,
+                    reason: e.to_string(),
+                };
+                Err(Stop::TlsHandshake(format!("TLS handshake failed: {e}")))
+            }
             Err(_) => Err(Stop::TlsHandshake("TLS handshake timed out".into())),
         }
     }
@@ -318,14 +350,22 @@ pub fn needs_smtputf8(tx: &Transaction<'_>) -> bool {
 }
 
 /// Runs one conversation over `stream` as `hostname` with the server
-/// `host` (the MX host name, also the TLS server name).
-pub async fn run<S>(stream: S, host: &str, hostname: &str, tls: Tls, tx: &Transaction<'_>) -> End
+/// `host` (the MX host name, also the TLS server name). Also returns what
+/// happened with TLS.
+pub async fn run<S>(
+    stream: S,
+    host: &str,
+    hostname: &str,
+    tls: Tls,
+    tx: &Transaction<'_>,
+) -> (End, TlsSeen)
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
 {
     let mut c = Conversation {
         stream: Stream::Plain(stream),
         buf: Vec::new(),
+        tls: TlsSeen::NotTried,
     };
     let required = matches!(tls, Tls::Required(_));
     let end = match converse(&mut c, host, hostname, tls, tx).await {
@@ -341,7 +381,7 @@ where
         };
         let _ = timeout(Duration::from_secs(15), quit).await;
     }
-    end
+    (end, c.tls)
 }
 
 async fn converse<S>(
@@ -376,6 +416,9 @@ where
     if let Some(config) = config {
         if ehlo.has(&Capability::StartTls) {
             let r = c.command(&Command::StartTls, COMMAND_TIMEOUT).await?;
+            if r.code != 220 {
+                c.tls = TlsSeen::Refused(describe(&r));
+            }
             if r.code == 220 {
                 c.starttls(config, host).await?;
                 // RFC 3207 §4.2: EHLO again; earlier capabilities are void.
@@ -389,10 +432,13 @@ where
                     describe(&r)
                 )));
             }
-        } else if matches!(tls, Tls::Required(_)) {
-            return Ok(End::HostFailed(
-                "TLS is required but STARTTLS is not offered".into(),
-            ));
+        } else {
+            c.tls = TlsSeen::NotOffered;
+            if matches!(tls, Tls::Required(_)) {
+                return Ok(End::HostFailed(
+                    "TLS is required but STARTTLS is not offered".into(),
+                ));
+            }
         }
     }
 

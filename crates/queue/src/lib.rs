@@ -152,6 +152,33 @@ pub enum Outcome {
     },
 }
 
+/// What a queued message is, which changes how it is delivered.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Kind {
+    /// Ordinary mail: the full TLS policy applies.
+    #[default]
+    Mail,
+    /// A TLS report (RFC 8460 §3): delivered despite TLS policy failures,
+    /// and its sessions are left out of the next report.
+    TlsReport,
+}
+
+impl Kind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Mail => "mail",
+            Self::TlsReport => "tls-report",
+        }
+    }
+
+    fn from_db(s: &str) -> Self {
+        match s {
+            "tls-report" => Self::TlsReport,
+            _ => Self::Mail,
+        }
+    }
+}
+
 /// Some recipients of one message for one domain, claimed for delivery.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Job {
@@ -159,6 +186,7 @@ pub struct Job {
     pub domain: String,
     /// MAIL FROM; None for the null reverse-path.
     pub sender: Option<String>,
+    pub kind: Kind,
     /// (recipient row id, address).
     pub recipients: Vec<(i64, String)>,
 }
@@ -226,6 +254,29 @@ const SCHEMA: &str = "
     CREATE INDEX IF NOT EXISTS recipients_due ON recipients(status, next_attempt);
 ";
 
+/// Columns added after the first schema: (table, column, definition).
+const ADDED_COLUMNS: &[(&str, &str, &str)] = &[(
+    "messages",
+    "kind",
+    "TEXT NOT NULL DEFAULT 'mail'", // mail | tls-report
+)];
+
+/// Adds the columns an older database lacks.
+fn migrate(db: &Connection) -> rusqlite::Result<()> {
+    for (table, column, definition) in ADDED_COLUMNS {
+        let mut stmt = db.prepare(&format!("PRAGMA table_info({table})"))?;
+        let names: Vec<String> = stmt
+            .query_map([], |r| r.get(1))?
+            .collect::<Result<_, _>>()?;
+        if !names.iter().any(|n| n == column) {
+            db.execute_batch(&format!(
+                "ALTER TABLE {table} ADD COLUMN {column} {definition}"
+            ))?;
+        }
+    }
+    Ok(())
+}
+
 fn domain_of(address: &str) -> String {
     address
         .rsplit_once('@')
@@ -250,6 +301,7 @@ impl Queue {
         std::fs::create_dir_all(spool.join("tmp"))?;
         let db = Connection::open(dir.join("queue.db"))?;
         db.execute_batch(SCHEMA)?;
+        migrate(&db)?;
         let q = Self {
             db: Mutex::new(db),
             spool,
@@ -306,7 +358,18 @@ impl Queue {
         recipients: &[String],
         message: &[u8],
     ) -> Result<String, QueueError> {
-        self.enqueue_inner(sender, recipients, message, None)
+        self.enqueue_inner(sender, recipients, message, Kind::Mail, None)
+    }
+
+    /// Queues a message of a given kind (see [`Kind`]).
+    pub fn enqueue_kind(
+        &self,
+        sender: Option<&str>,
+        recipients: &[String],
+        message: &[u8],
+        kind: Kind,
+    ) -> Result<String, QueueError> {
+        self.enqueue_inner(sender, recipients, message, kind, None)
     }
 
     fn enqueue_inner(
@@ -314,6 +377,7 @@ impl Queue {
         sender: Option<&str>,
         recipients: &[String],
         message: &[u8],
+        kind: Kind,
         #[cfg(test)] crash: Option<CrashPoint>,
         #[cfg(not(test))] _crash: Option<()>,
     ) -> Result<String, QueueError> {
@@ -344,12 +408,13 @@ impl Queue {
             let mut db = self.db();
             let tx = db.transaction()?;
             tx.execute(
-                "INSERT INTO messages (id, sender, arrival, size) VALUES (?1, ?2, ?3, ?4)",
+                "INSERT INTO messages (id, sender, arrival, size, kind) VALUES (?1, ?2, ?3, ?4, ?5)",
                 params![
                     id,
                     sender,
                     now,
-                    i64::try_from(message.len()).unwrap_or(i64::MAX)
+                    i64::try_from(message.len()).unwrap_or(i64::MAX),
+                    kind.as_str()
                 ],
             )?;
             for r in recipients {
@@ -467,9 +532,9 @@ impl Queue {
         let now = self.clock.now();
         let mut db = self.db();
         let tx = db.transaction()?;
-        let rows: Vec<(i64, String, String, String, Option<String>)> = {
+        let rows: Vec<(i64, String, String, String, Option<String>, String)> = {
             let mut stmt = tx.prepare(
-                "SELECT r.rid, r.message_id, r.address, r.domain, m.sender
+                "SELECT r.rid, r.message_id, r.address, r.domain, m.sender, m.kind
                  FROM recipients r JOIN messages m ON m.id = r.message_id
                  WHERE r.status = 'queued' AND r.next_attempt <= ?1
                    AND (r.lease_until IS NULL OR r.lease_until < ?1)
@@ -480,7 +545,16 @@ impl Queue {
             let rows = stmt
                 .query_map(
                     params![now, i64::try_from(limit).unwrap_or(i64::MAX)],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                    |r| {
+                        Ok((
+                            r.get(0)?,
+                            r.get(1)?,
+                            r.get(2)?,
+                            r.get(3)?,
+                            r.get(4)?,
+                            r.get(5)?,
+                        ))
+                    },
                 )?
                 .collect::<Result<_, _>>()?;
             rows
@@ -493,7 +567,7 @@ impl Queue {
         }
         tx.commit()?;
         let mut jobs: Vec<Job> = Vec::new();
-        for (rid, message_id, address, domain, sender) in rows {
+        for (rid, message_id, address, domain, sender, kind) in rows {
             match jobs
                 .iter_mut()
                 .find(|j| j.message_id == message_id && j.domain == domain)
@@ -503,6 +577,7 @@ impl Queue {
                     message_id,
                     domain,
                     sender,
+                    kind: Kind::from_db(&kind),
                     recipients: vec![(rid, address)],
                 }),
             }

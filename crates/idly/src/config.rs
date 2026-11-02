@@ -28,6 +28,8 @@ pub(crate) struct Config {
     #[serde(default)]
     pub(crate) test_mode: TestMode,
     #[serde(default)]
+    pub(crate) tls_reporting: TlsReporting,
+    #[serde(default)]
     pub(crate) log: Log,
 }
 
@@ -226,6 +228,31 @@ pub(crate) struct TestMode {
     pub(crate) enabled: bool,
     #[serde(default)]
     pub(crate) allow_domains: Vec<String>,
+}
+
+/// Daily SMTP TLS reports (RFC 8460) to domains that ask for them.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct TlsReporting {
+    #[serde(default)]
+    pub(crate) enabled: bool,
+    /// The reports' contact address and the From of report mail. Its
+    /// domain must be a [[domain]] with a DKIM key (RFC 8460 §3: report
+    /// mail must be DKIM-signed by the reporting domain).
+    #[serde(default)]
+    pub(crate) from: Option<String>,
+    /// The "organization-name" in reports (default: server.hostname).
+    #[serde(default)]
+    pub(crate) organization: Option<String>,
+}
+
+impl TlsReporting {
+    /// The From address's domain (A-label), when reporting is on.
+    pub(crate) fn report_domain(&self) -> Option<String> {
+        let from = self.from.as_ref().filter(|_| self.enabled)?;
+        let (_, domain) = from.rsplit_once('@')?;
+        domain_ascii(domain)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -502,6 +529,32 @@ impl Config {
             }
         }
 
+        let r = &self.tls_reporting;
+        if r.enabled {
+            match &r.from {
+                None => bad(
+                    "tls_reporting.from".into(),
+                    "required when TLS reporting is enabled",
+                ),
+                Some(from) => match Mailbox::parse(from) {
+                    Ok(m) if matches!(&m.host, Host::Domain(d) if self.is_local_domain(d)) => {}
+                    Ok(_) => bad(
+                        "tls_reporting.from".into(),
+                        "domain is not one of the [[domain]] entries",
+                    ),
+                    Err(_) => bad("tls_reporting.from".into(), "not a valid email address"),
+                },
+            }
+        }
+        if r.organization.as_ref().is_some_and(|o| {
+            o.trim().is_empty() || o.len() > 200 || o.chars().any(char::is_control)
+        }) {
+            bad(
+                "tls_reporting.organization".into(),
+                "must be a non-empty name of at most 200 characters",
+            );
+        }
+
         if tracing_subscriber::EnvFilter::try_new(&self.log.level).is_err() {
             bad(
                 "log.level".into(),
@@ -703,5 +756,31 @@ mod tests {
         assert!(c.is_local_domain("BÜCHER.example"));
         assert!(c.is_local_domain("xn--bcher-kva.example"));
         assert!(!c.is_local_domain("example.org"));
+    }
+
+    #[test]
+    fn tls_reporting_needs_a_local_from_address() {
+        let on = |from: &str| format!("{MINIMAL}\n[tls_reporting]\nenabled = true\n{from}");
+        assert_eq!(
+            problems(&on("")),
+            ["tls_reporting.from: required when TLS reporting is enabled"]
+        );
+        assert_eq!(
+            problems(&on("from = \"tlsrpt@other.example\"")),
+            ["tls_reporting.from: domain is not one of the [[domain]] entries"]
+        );
+        assert_eq!(
+            problems(&on("from = \"nope\"")),
+            ["tls_reporting.from: not a valid email address"]
+        );
+        let c = Config::parse(&on("from = \"tlsrpt@Example.ORG\"")).unwrap();
+        c.validate().unwrap();
+        assert_eq!(
+            c.tls_reporting.report_domain().as_deref(),
+            Some("example.org")
+        );
+        // Off by default, and then the address isn't needed.
+        let c = Config::parse(MINIMAL).unwrap();
+        assert!(!c.tls_reporting.enabled && c.tls_reporting.report_domain().is_none());
     }
 }

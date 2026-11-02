@@ -8,7 +8,7 @@ use std::time::Duration;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
-use crate::{Job, Outcome, Queue};
+use crate::{Job, Kind, Outcome, Queue};
 
 /// Delivers one message to some recipients in one domain. The real one
 /// (milestone 7) looks up the domain's MX in DNS and speaks SMTP; tests use
@@ -21,6 +21,7 @@ pub trait Connector: Send + Sync + 'static {
         sender: Option<&str>,
         recipients: &[String],
         message: &[u8],
+        kind: Kind,
     ) -> impl Future<Output = Vec<Outcome>> + Send;
 }
 
@@ -131,7 +132,13 @@ async fn deliver_job<C: Connector>(queue: &Arc<Queue>, connector: &C, job: Job) 
     };
     let addresses: Vec<String> = job.recipients.iter().map(|(_, a)| a.clone()).collect();
     let results = connector
-        .deliver(&job.domain, job.sender.as_deref(), &addresses, &message)
+        .deliver(
+            &job.domain,
+            job.sender.as_deref(),
+            &addresses,
+            &message,
+            job.kind,
+        )
         .await;
     let outcomes = job
         .recipients

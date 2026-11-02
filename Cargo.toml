@@ -27,6 +27,9 @@ rusqlite = { version = "0.41", default-features = false, features = ["bundled", 
 rustix = { version = "1", default-features = false, features = ["std", "fs"] }
 ring = { version = "0.17", default-features = false, features = ["std"] }
 base64 = { version = "0.23", default-features = false, features = ["std"] }
+serde_json = { version = "1", default-features = false, features = ["std"] }
+# gzip for TLS reports (RFC 8460 §5.2); the pure-Rust miniz_oxide backend.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 rsa = { version = "0.9", default-features = false, features = ["std", "pem"] }
 rand_core = { version = "0.6", default-features = false, features = ["getrandom"] }
 hickory-resolver = { version = "=0.26.3", default-features = false, features = ["recursor", "dnssec-ring", "tokio"] }

@@ -88,6 +88,10 @@ pub const DEFAULT_HEADERS: &[&str] = &[
     "List-Id",
     "List-Unsubscribe",
     "List-Unsubscribe-Post",
+    // RFC 8460 §5.3: TLS reports SHOULD sign these.
+    "TLS-Report-Domain",
+    "TLS-Report-Submitter",
+    "Auto-Submitted",
 ];
 
 /// Signs messages for one domain and selector.

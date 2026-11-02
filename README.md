@@ -8,7 +8,8 @@ scale out to a cluster later.
 > **Status:** Phase 1 in progress. Idly receives mail (with TLS and
 > SPF/DKIM/DMARC checks), accepts authenticated submissions, DKIM-signs
 > them and delivers them directly to each recipient's MX (with DANE,
-> MTA-STS or opportunistic TLS). Not yet tested against real providers.
+> MTA-STS or opportunistic TLS, and daily TLS reports to domains that ask
+> for them). Not yet tested against real providers.
 > A local, receive-only demo is in [Try it locally](#try-it-locally). See
 > [Roadmap](#roadmap).
 

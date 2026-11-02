@@ -129,3 +129,10 @@ path = "fuzz_targets/smtp_client_session.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "tlsrpt"
+path = "fuzz_targets/tlsrpt.rs"
+test = false
+doc = false
+bench = false

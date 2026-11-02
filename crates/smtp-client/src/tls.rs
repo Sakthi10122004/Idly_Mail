@@ -6,9 +6,10 @@
 //! 2. MTA-STS `enforce` (RFC 8461): TLS is mandatory and the certificate
 //!    must be valid for the MX host name under the system's trusted roots.
 //! 3. Opportunistic STARTTLS (RFC 7435): encrypt when offered, without
-//!    authenticating the server.
+//!    authenticating the server. MTA-STS `testing` is opportunistic too,
+//!    but checks the certificate as `enforce` would, for TLS reports.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use dns::Tlsa;
 use ring::digest::{SHA256, SHA512, digest};
@@ -30,12 +31,15 @@ pub(crate) enum Policy {
     Dane(Vec<Tlsa>),
     /// Mandatory TLS with a WebPKI certificate for the host (MTA-STS).
     WebPki,
+    /// MTA-STS `testing` (RFC 8461 §5): validated like `WebPki`, but a
+    /// failure is only noted (for the TLS report) and delivery goes on.
+    StsTesting,
 }
 
 impl Policy {
     /// Whether delivery must not happen without TLS.
     pub(crate) fn required(&self) -> bool {
-        !matches!(self, Self::Opportunistic)
+        !matches!(self, Self::Opportunistic | Self::StsTesting)
     }
 
     /// A short name for logs.
@@ -45,6 +49,7 @@ impl Policy {
             Self::EncryptOnly => "dane-encrypt-only",
             Self::Dane(_) => "dane",
             Self::WebPki => "mta-sts",
+            Self::StsTesting => "mta-sts-testing",
         }
     }
 }
@@ -59,12 +64,47 @@ pub(crate) fn provider() -> Arc<CryptoProvider> {
     Arc::new(rustls::crypto::ring::default_provider())
 }
 
+/// Holds a certificate failure that was let through ([`Policy::StsTesting`]).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Witness(Arc<Mutex<Option<rustls::Error>>>);
+
+impl Witness {
+    fn note(&self, e: rustls::Error) {
+        if let Ok(mut slot) = self.0.lock() {
+            *slot = Some(e);
+        }
+    }
+
+    /// The failure noted since the last call, if any.
+    pub(crate) fn take(&self) -> Option<rustls::Error> {
+        self.0.lock().ok().and_then(|mut slot| slot.take())
+    }
+}
+
+/// The RFC 8460 §4.3 result type for a certificate or handshake error.
+pub(crate) fn result_type(e: &rustls::Error) -> &'static str {
+    use rustls::CertificateError as C;
+    match e {
+        rustls::Error::InvalidCertificate(c) => match c {
+            C::Expired
+            | C::ExpiredContext { .. }
+            | C::NotValidYet
+            | C::NotValidYetContext { .. } => "certificate-expired",
+            C::NotValidForName | C::NotValidForNameContext { .. } => "certificate-host-mismatch",
+            _ => "certificate-not-trusted",
+        },
+        _ => "validation-failure",
+    }
+}
+
 /// The client configuration for `policy`. `roots` are the trusted CAs for
-/// MTA-STS (the system's roots in production).
+/// MTA-STS (the system's roots in production). The [`Witness`] collects
+/// failures that `StsTesting` lets through.
 pub(crate) fn client_config(
     policy: &Policy,
     roots: &Arc<RootCertStore>,
-) -> Result<Arc<ClientConfig>, rustls::Error> {
+) -> Result<(Arc<ClientConfig>, Witness), rustls::Error> {
+    let witness = Witness::default();
     let provider = provider();
     let builder = ClientConfig::builder_with_provider(provider.clone())
         .with_safe_default_protocol_versions()?;
@@ -79,12 +119,26 @@ pub(crate) fn client_config(
                 provider,
             }))
             .with_no_client_auth(),
+        Policy::StsTesting => {
+            let webpki =
+                WebPkiServerVerifier::builder_with_provider(roots.clone(), provider.clone())
+                    .build()
+                    .ok();
+            builder
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(Lenient {
+                    webpki,
+                    witness: witness.clone(),
+                    provider,
+                }))
+                .with_no_client_auth()
+        }
         Policy::Opportunistic | Policy::EncryptOnly => builder
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(AnyCertificate { provider }))
             .with_no_client_auth(),
     };
-    Ok(Arc::new(config))
+    Ok((Arc::new(config), witness))
 }
 
 /// A DER length header for `len` octets.
@@ -241,6 +295,75 @@ impl ServerCertVerifier for AnyCertificate {
         _ocsp_response: &[u8],
         _now: UnixTime,
     ) -> Result<ServerCertVerified, rustls::Error> {
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.provider
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
+
+/// MTA-STS `testing`: checks the certificate like `enforce` would, notes a
+/// failure in the [`Witness`], and accepts the certificate anyway. The
+/// handshake signature must still be valid.
+#[derive(Debug)]
+struct Lenient {
+    /// None when there are no usable roots: every certificate then fails.
+    webpki: Option<Arc<WebPkiServerVerifier>>,
+    witness: Witness,
+    provider: Arc<CryptoProvider>,
+}
+
+impl ServerCertVerifier for Lenient {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        server_name: &ServerName<'_>,
+        ocsp_response: &[u8],
+        now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        let checked = match &self.webpki {
+            Some(v) => v
+                .verify_server_cert(end_entity, intermediates, server_name, ocsp_response, now)
+                .map(|_| ()),
+            None => Err(rustls::Error::InvalidCertificate(
+                rustls::CertificateError::UnknownIssuer,
+            )),
+        };
+        if let Err(e) = checked {
+            self.witness.note(e);
+        }
         Ok(ServerCertVerified::assertion())
     }
 
