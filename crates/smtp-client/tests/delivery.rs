@@ -113,6 +113,8 @@ struct Script {
     broken_tls: bool,
     /// Replies to RCPT by address (default 250).
     rcpt: HashMap<&'static str, &'static str>,
+    /// The reply to MAIL (default 250).
+    mail: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -122,6 +124,8 @@ struct Session {
     tls: bool,
     commands: Vec<String>,
     data: Vec<Vec<u8>>,
+    /// Commands that arrived while an earlier one was still unanswered.
+    pipelined: usize,
 }
 
 impl Session {
@@ -179,7 +183,11 @@ async fn serve_mx(mut s: Box<dyn Io>, script: Script, log: Log, idx: usize) {
     let mut tls = false;
     while let Some(line) = read_line(&mut s, &mut buf).await {
         let text = String::from_utf8_lossy(&line).to_string();
-        record(&|x| x.commands.push(text.clone()));
+        let waiting = buf.windows(2).any(|w| w == b"\r\n");
+        record(&|x| {
+            x.commands.push(text.clone());
+            x.pipelined += usize::from(waiting);
+        });
         let upper = text.to_ascii_uppercase();
         let reply: String = if upper.starts_with("EHLO ") {
             record(&|x| x.ehlo.push(text[5..].to_owned()));
@@ -217,6 +225,8 @@ async fn serve_mx(mut s: Box<dyn Io>, script: Script, log: Log, idx: usize) {
                 }
                 Err(_) => return,
             }
+        } else if upper.starts_with("MAIL FROM:") && script.mail.is_some() {
+            format!("{}\r\n", script.mail.unwrap_or_default())
         } else if upper.starts_with("MAIL FROM:") || upper == "RSET" {
             "250 2.1.0 ok\r\n".into()
         } else if upper.starts_with("RCPT TO:") {
@@ -229,6 +239,11 @@ async fn serve_mx(mut s: Box<dyn Io>, script: Script, log: Log, idx: usize) {
         } else if upper == "DATA" {
             let _ = s.write_all(b"354 go ahead\r\n").await;
             loop {
+                if buf.starts_with(b".\r\n") {
+                    buf.drain(..3);
+                    record(&|x| x.data.push(Vec::new()));
+                    break;
+                }
                 if let Some(i) = buf.windows(5).position(|w| w == b"\r\n.\r\n") {
                     let data = buf[..i + 2].to_vec();
                     buf.drain(..i + 5);
@@ -434,6 +449,115 @@ async fn no_accepted_recipient_means_no_data() {
         log[0].commands.contains(&"MAIL FROM:<>".to_owned()),
         "null sender for bounces"
     );
+}
+
+#[tokio::test]
+async fn pipelining_sends_one_group_and_matches_replies_by_count() {
+    let mut script = Script {
+        caps: vec!["PIPELINING"],
+        ..Script::default()
+    };
+    script.rcpt.insert(
+        "bad@example.com",
+        "550-5.1.1 no such user\r\n550 5.1.1 really",
+    );
+    let (port, log) = fake_mx(script).await;
+    let out = simple(zone(), port)
+        .deliver_to(
+            "example.com",
+            Some("a@example.org"),
+            &rcpts(&["one@example.com", "bad@example.com", "two@example.com"]),
+            MSG,
+        )
+        .await;
+    assert_eq!(
+        out.iter().map(status).collect::<Vec<_>>(),
+        ["delivered", "5.1.1", "delivered"]
+    );
+    let log = log.lock().unwrap();
+    let s = &log[0];
+    // RFC 2920 §3.1: MAIL, the RCPTs and DATA in one group, DATA last.
+    let verbs: Vec<&str> = s.commands.iter().map(|c| &c[..4]).collect();
+    assert_eq!(&verbs[1..6], ["MAIL", "RCPT", "RCPT", "RCPT", "DATA"]);
+    assert_eq!(
+        s.pipelined, 4,
+        "MAIL and every RCPT had a command behind it"
+    );
+    assert_eq!(s.data.len(), 1);
+}
+
+#[tokio::test]
+async fn without_pipelining_commands_wait_for_replies() {
+    let (port, log) = fake_mx(Script::default()).await;
+    let out = simple(zone(), port)
+        .deliver_to(
+            "example.com",
+            None,
+            &rcpts(&["one@example.com", "two@example.com"]),
+            MSG,
+        )
+        .await;
+    assert!(out.iter().all(|o| *o == Outcome::Delivered));
+    assert_eq!(log.lock().unwrap()[0].pipelined, 0);
+}
+
+#[tokio::test]
+async fn pipelined_data_accepted_without_recipients_sends_a_lone_dot() {
+    // The fake MX answers DATA with 354 even when no RCPT was accepted;
+    // RFC 2920 §3.1: the client must check, and send a single dot.
+    let mut script = Script {
+        caps: vec!["PIPELINING"],
+        ..Script::default()
+    };
+    script.rcpt.insert("x@example.com", "550 5.1.1 nope");
+    let (port, log) = fake_mx(script).await;
+    let out = simple(zone(), port)
+        .deliver_to("example.com", None, &rcpts(&["x@example.com"]), MSG)
+        .await;
+    assert_eq!(status(&out[0]), "5.1.1");
+    assert_eq!(
+        log.lock().unwrap()[0].data,
+        vec![Vec::<u8>::new()],
+        "only the dot was sent"
+    );
+
+    // A refused MAIL decides every recipient, even with replies pending.
+    let (port, log) = fake_mx(Script {
+        caps: vec!["PIPELINING"],
+        mail: Some("550 5.7.1 sender blocked"),
+        ..Script::default()
+    })
+    .await;
+    let out = simple(zone(), port)
+        .deliver_to(
+            "example.com",
+            Some("a@example.org"),
+            &rcpts(&["a@example.com", "b@example.com"]),
+            MSG,
+        )
+        .await;
+    assert_eq!(
+        out.iter().map(status).collect::<Vec<_>>(),
+        ["5.7.1", "5.7.1"]
+    );
+    assert_eq!(log.lock().unwrap()[0].data, vec![Vec::<u8>::new()]);
+}
+
+#[tokio::test]
+async fn large_pipelined_groups_do_not_deadlock() {
+    let (port, log) = fake_mx(Script {
+        caps: vec!["PIPELINING"],
+        ..Script::default()
+    })
+    .await;
+    let many: Vec<String> = (0..2000)
+        .map(|i| format!("recipient-number-{i:05}-{}@example.com", "x".repeat(40)))
+        .collect();
+    let out = simple(zone(), port)
+        .deliver_to("example.com", None, &many, MSG)
+        .await;
+    assert!(out.iter().all(|o| *o == Outcome::Delivered));
+    assert_eq!(log.lock().unwrap()[0].count("RCPT"), 2000);
 }
 
 // ---------------------------------------------------------------- a. SSRF guard

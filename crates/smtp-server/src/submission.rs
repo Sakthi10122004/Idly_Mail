@@ -102,10 +102,34 @@ pub(crate) fn prepare(
     let mut prepared = added.into_bytes();
     prepared.extend_from_slice(message);
 
+    // RFC 6376 §5.3: convert 8-bit bodies to 7 bits BEFORE signing, so a
+    // later downgrade for a server without 8BITMIME (RFC 6152 §3) can't
+    // break the signature. Mail with 8-bit header fields needs SMTPUTF8,
+    // and SMTPUTF8 servers always offer 8BITMIME (RFC 6531 §3.1), so it
+    // is never downgraded and is signed as it is.
+    let header_end = prepared
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .unwrap_or(prepared.len());
+    let ascii_headers = prepared.get(..header_end).is_some_and(<[u8]>::is_ascii);
+    let seven_bit = if ascii_headers && mime::is_eight_bit(&prepared) {
+        match mime::to_seven_bit(&prepared) {
+            Ok(m) => Some(m.into_owned()),
+            Err(e) => {
+                tracing::info!(error = ?e, "8-bit submission can't be converted to 7 bits; signing it as it is");
+                None
+            }
+        }
+    } else {
+        None
+    };
     // CLAUDE.md: re-encode lines over 998 octets BEFORE signing (RFC 6409 §8.4).
-    let prepared = mime::fix_long_lines(&prepared)
-        .map_err(Refusal::Unencodable)?
-        .into_owned();
+    let prepared = match seven_bit {
+        Some(m) => m,
+        None => mime::fix_long_lines(&prepared)
+            .map_err(Refusal::Unencodable)?
+            .into_owned(),
+    };
 
     // RFC 6409 §8.5: the MSA may sign; we sign with the From domain's keys.
     let mut out = Vec::with_capacity(prepared.len() + 1024);

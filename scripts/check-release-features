@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Fails if the release binary would be built with a `testing` feature
+# (CLAUDE.md: the static test resolver and the loopback test dialer exist
+# only in tests). Looks at the features of idly's normal (non-dev)
+# dependency tree, for every target platform.
+set -euo pipefail
+
+tree=$(cargo tree -p idly --locked -e normal --target all \
+    -f '{p} [{f}]' --prefix none --no-dedupe)
+
+bad=$(grep -E '\[([^]]*,)?testing(,[^]]*)?\]$' <<<"$tree" | sort -u || true)
+if [[ -n "$bad" ]]; then
+    echo "error: the release binary enables a testing feature:" >&2
+    echo "$bad" >&2
+    exit 1
+fi
+echo "release build: no testing features enabled"

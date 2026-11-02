@@ -176,6 +176,12 @@ grouped by development phase (see the roadmap in [README.md](README.md)).
     (RFC 6152). Mail that needs SMTPUTF8 fails with `5.6.7` at servers
     without it (RFC 6531). The server's SIZE limit is respected (`5.3.4`).
   - RFC 5321 §4.5.3.2 timeouts for every step.
+  - **PIPELINING** (RFC 2920): with servers that offer it, MAIL, every
+    RCPT and DATA go in one batch, and the replies are matched to the
+    commands by counting. The batch is written while the replies are
+    read, so a large batch can't deadlock. If the server answers DATA
+    with 354 although no recipient was accepted, Idly sends a lone "."
+    and sends no message.
   - The queue now delivers: every 30 seconds it hands due messages to the
     client.
 - **`server.outbound_ips`**: the addresses outbound mail is sent from, at
@@ -206,6 +212,12 @@ grouped by development phase (see the roadmap in [README.md](README.md)).
   paths with brackets.
 - **Spam-scoring signals:** each accepted message now records a missing
   angle bracket or an invalid HELO/EHLO name, for the future spam scorer.
+- **8-bit submissions are converted to 7 bits before DKIM signing**
+  (RFC 6376 §5.3): 8-bit body parts are re-encoded as quoted-printable,
+  so delivery to a server without 8BITMIME no longer breaks the
+  signature. Mail with non-ASCII header fields needs SMTPUTF8, whose
+  servers always support 8BITMIME (RFC 6531 §3.1); it is signed
+  unchanged.
 - **DMARC will follow RFC 9989** (DMARCbis, May 2026) instead of the
   obsolete RFC 7489. Its DNS Tree Walk replaces the Public Suffix List, so
   no list data is needed.
@@ -215,6 +227,11 @@ grouped by development phase (see the roadmap in [README.md](README.md)).
 - **One crypto library:** `ring` everywhere. `aws-lc-rs`/`aws-lc-sys`
   (OpenSSL-licensed code) and `webpki-roots` (CDLA license) are banned in
   `deny.toml`.
+
+- **CI checks that the release binary has no test-only code:**
+  `scripts/check-release-features` fails if the `testing` feature of any
+  crate (the static test resolver, the loopback test dialer) is enabled
+  in `idly`'s normal dependency tree.
 
 #### Fixed
 - **DNSSEC answers from zones signed with several keys came out as

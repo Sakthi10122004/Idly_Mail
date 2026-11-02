@@ -424,6 +424,71 @@ async fn submission_reencodes_signs_and_routes() {
     );
 }
 
+#[tokio::test]
+async fn eight_bit_submissions_are_converted_before_signing() {
+    let key = dkim::keygen::ed25519().unwrap();
+    let mut keys = DkimKeys::new();
+    keys.add(
+        "example.org",
+        Signer::new(
+            SigningKey::from_pkcs8(&key.private_pkcs8).unwrap(),
+            "example.org",
+            "ed",
+        )
+        .unwrap(),
+    );
+    let h = start(Setup {
+        dkim: Some(keys),
+        ..Setup::default()
+    })
+    .await;
+    let mut c = logged_in(&h, "alice@example.org", "alice-pw").await;
+    c.cmd("MAIL FROM:<alice@example.org> BODY=8BITMIME").await;
+    c.cmd("RCPT TO:<bob@example.org>").await;
+    c.cmd("DATA").await;
+    c.send(
+        "From: alice@example.org\r\nSubject: =?utf-8?q?caf=C3=A9?=\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\nUn café, s'il vous plaît.\r\n.\r\n"
+            .as_bytes(),
+    )
+    .await;
+    assert_eq!(c.reply().await.unwrap().code, 250);
+    let (_, msg) = h.captured.all().remove(0);
+    // RFC 6376 §5.3: signed in 7-bit form, so a downgrade for a server
+    // without 8BITMIME changes nothing and the signature survives.
+    assert!(msg.is_ascii(), "converted to 7 bits");
+    assert!(matches!(
+        mail_auth_glue::mime::to_seven_bit(&msg).unwrap(),
+        std::borrow::Cow::Borrowed(_)
+    ));
+    let text = String::from_utf8(msg.clone()).unwrap();
+    assert!(text.contains("Content-Transfer-Encoding: quoted-printable"));
+    assert!(text.contains("caf=C3=A9"));
+    let r = StaticResolver::new().with_txt("ed._domainkey.example.org", &key.dns_record);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let results = dkim::verify(&r, &msg, now).await;
+    assert_eq!(
+        results.iter().map(|v| v.result.clone()).collect::<Vec<_>>(),
+        vec![DkimResult::Pass]
+    );
+
+    // 8-bit header fields (SMTPUTF8 mail) are signed as they are.
+    c.cmd("MAIL FROM:<alice@example.org> SMTPUTF8").await;
+    c.cmd("RCPT TO:<bob@example.org>").await;
+    c.cmd("DATA").await;
+    c.send("From: alice@example.org\r\nSubject: café\r\n\r\nUn café.\r\n.\r\n".as_bytes())
+        .await;
+    assert_eq!(c.reply().await.unwrap().code, 250);
+    let (_, msg) = h.captured.all().remove(1);
+    assert!(
+        String::from_utf8(msg)
+            .unwrap()
+            .contains("\r\n\r\nUn café.\r\n")
+    );
+}
+
 // ---------------------------------------------------------------- 8-10. inbound checks and policies
 
 /// example.org and remote domains with SPF and DMARC records.

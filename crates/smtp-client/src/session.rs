@@ -141,33 +141,42 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Conversation<S> {
     }
 
     async fn reply(&mut self, limit: Duration) -> Result<Reply, Stop> {
-        let read = async {
-            loop {
-                match Reply::parse(&self.buf, MAX_REPLY_LINE) {
-                    Ok(Some((reply, used))) => {
-                        self.buf.drain(..used.min(self.buf.len()));
-                        return Ok(reply);
-                    }
-                    Ok(None) if self.buf.len() > MAX_REPLY => {
-                        return Err(Stop::Io("reply too long".into()));
-                    }
-                    Ok(None) => {}
-                    Err(e) => return Err(Stop::Io(format!("malformed reply: {e}"))),
-                }
-                let mut chunk = [0u8; 4096];
-                match self.stream.read(&mut chunk).await {
-                    Ok(0) => return Err(Stop::Io("connection closed".into())),
-                    Ok(n) => self
-                        .buf
-                        .extend_from_slice(chunk.get(..n).unwrap_or_default()),
-                    Err(e) => return Err(Stop::Io(format!("read failed: {e}"))),
-                }
+        read_reply(&mut self.stream, &mut self.buf, limit).await
+    }
+
+    /// RFC 2920 §3.1: sends a group of commands at once and reads one reply
+    /// per command, in order (`limits` has one timeout per command). The
+    /// replies are read while the group is still being written, so a large
+    /// group can't deadlock against a server that answers as it reads.
+    /// Returns the replies read before any failure, and the failure.
+    async fn pipeline(&mut self, group: &[u8], limits: &[Duration]) -> (Vec<Reply>, Option<Stop>) {
+        let stream = std::mem::replace(&mut self.stream, Stream::Gone);
+        let (mut rd, mut wr) = tokio::io::split(stream);
+        let buf = &mut self.buf;
+        let write = async {
+            let w = async {
+                wr.write_all(group).await?;
+                wr.flush().await
+            };
+            match timeout(MAIL_TIMEOUT, w).await {
+                Ok(Ok(())) => None,
+                Ok(Err(e)) => Some(Stop::Io(format!("write failed: {e}"))),
+                Err(_) => Some(Stop::Io("timed out sending".into())),
             }
         };
-        match timeout(limit, read).await {
-            Ok(r) => r,
-            Err(_) => Err(Stop::Io("timed out waiting for a reply".into())),
-        }
+        let read = async {
+            let mut replies = Vec::with_capacity(limits.len());
+            for &limit in limits {
+                match read_reply(&mut rd, buf, limit).await {
+                    Ok(r) => replies.push(r),
+                    Err(e) => return (replies, Some(e)),
+                }
+            }
+            (replies, None)
+        };
+        let (write_error, (replies, read_error)) = tokio::join!(write, read);
+        self.stream = rd.unsplit(wr);
+        (replies, read_error.or(write_error))
     }
 
     async fn command(&mut self, cmd: &Command, limit: Duration) -> Result<Reply, Stop> {
@@ -217,6 +226,39 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Conversation<S> {
             Ok(Err(e)) => Err(Stop::TlsHandshake(format!("TLS handshake failed: {e}"))),
             Err(_) => Err(Stop::TlsHandshake("TLS handshake timed out".into())),
         }
+    }
+}
+
+/// Reads one (possibly multi-line) reply, buffering extra bytes in `buf`.
+async fn read_reply<R: AsyncRead + Unpin>(
+    rd: &mut R,
+    buf: &mut Vec<u8>,
+    limit: Duration,
+) -> Result<Reply, Stop> {
+    let read = async {
+        loop {
+            match Reply::parse(buf, MAX_REPLY_LINE) {
+                Ok(Some((reply, used))) => {
+                    buf.drain(..used.min(buf.len()));
+                    return Ok(reply);
+                }
+                Ok(None) if buf.len() > MAX_REPLY => {
+                    return Err(Stop::Io("reply too long".into()));
+                }
+                Ok(None) => {}
+                Err(e) => return Err(Stop::Io(format!("malformed reply: {e}"))),
+            }
+            let mut chunk = [0u8; 4096];
+            match rd.read(&mut chunk).await {
+                Ok(0) => return Err(Stop::Io("connection closed".into())),
+                Ok(n) => buf.extend_from_slice(chunk.get(..n).unwrap_or_default()),
+                Err(e) => return Err(Stop::Io(format!("read failed: {e}"))),
+            }
+        }
+    };
+    match timeout(limit, read).await {
+        Ok(r) => r,
+        Err(_) => Err(Stop::Io("timed out waiting for a reply".into())),
     }
 }
 
@@ -415,52 +457,66 @@ where
     if utf8 {
         params.push(MailParam::SmtpUtf8);
     }
-    let r = c
-        .command(&Command::Mail { from, params }, MAIL_TIMEOUT)
-        .await?;
-    if !r.is_positive() {
-        return Ok(End::Done(all(n, &outcome(&r, "5.1.7"))));
-    }
+    let mail = Command::Mail { from, params };
 
-    // RCPT TO for each recipient (RFC 5321 §4.1.1.3); failures are per
-    // recipient.
+    // RCPT TO for each valid recipient (RFC 5321 §4.1.1.3); failures are
+    // per recipient.
     let mut outcomes: Vec<Option<Outcome>> = vec![None; n];
-    let mut accepted = Vec::new();
+    let mut rcpts = Vec::new();
     for (i, rcpt) in tx.recipients.iter().enumerate() {
-        let Ok(mailbox) = Mailbox::parse(rcpt) else {
-            if let Some(o) = outcomes.get_mut(i) {
-                *o = Some(permanent(
-                    "5.1.3",
-                    format!("invalid recipient address {rcpt:?}"),
-                ));
+        match Mailbox::parse(rcpt) {
+            Ok(mailbox) => rcpts.push((
+                i,
+                Command::Rcpt {
+                    to: ForwardPath::Mailbox(mailbox),
+                    params: Vec::new(),
+                },
+            )),
+            Err(_) => {
+                if let Some(o) = outcomes.get_mut(i) {
+                    *o = Some(permanent(
+                        "5.1.3",
+                        format!("invalid recipient address {rcpt:?}"),
+                    ));
+                }
             }
-            continue;
-        };
-        let cmd = Command::Rcpt {
-            to: ForwardPath::Mailbox(mailbox),
-            params: Vec::new(),
-        };
-        let r = c.command(&cmd, RCPT_TIMEOUT).await?;
-        if r.is_positive() {
-            accepted.push(i);
-        } else if let Some(o) = outcomes.get_mut(i) {
-            *o = Some(outcome(&r, "5.1.1"));
         }
     }
+
+    let replies = if ehlo.has(&Capability::Pipelining) && !rcpts.is_empty() {
+        pipelined(c, &mail, &rcpts).await?
+    } else {
+        one_by_one(c, &mail, &rcpts).await?
+    };
     let finish = |outcomes: Vec<Option<Outcome>>, rest: &Outcome| {
         outcomes
             .into_iter()
             .map(|o| o.unwrap_or_else(|| rest.clone()))
             .collect::<Vec<_>>()
     };
-    if accepted.is_empty() {
-        let _ = c.command(&Command::Rset, COMMAND_TIMEOUT).await;
+    if !replies.mail.is_positive() {
+        abandon_data(c, replies.data.as_ref()).await;
+        let o = outcome(&replies.mail, "5.1.7");
+        return Ok(End::Done(finish(outcomes, &o)));
+    }
+    let mut accepted = 0usize;
+    for ((i, _), r) in rcpts.iter().zip(&replies.rcpt) {
+        if r.is_positive() {
+            accepted += 1;
+        } else if let Some(o) = outcomes.get_mut(*i) {
+            *o = Some(outcome(r, "5.1.1"));
+        }
+    }
+    if accepted == 0 {
+        abandon_data(c, replies.data.as_ref()).await;
         let none = Outcome::Temporary("no recipient was accepted".into());
         return Ok(End::Done(finish(outcomes, &none)));
     }
 
     // DATA (RFC 5321 §4.1.1.4).
-    let r = c.command(&Command::Data, DATA_INIT_TIMEOUT).await?;
+    let Some(r) = replies.data else {
+        return Err(Stop::Io("no reply to DATA".into()));
+    };
     if r.code != 354 {
         let o = if r.is_positive() {
             Outcome::Temporary(format!("unexpected reply to DATA: {}", describe(&r)))
@@ -480,4 +536,99 @@ where
     let r = c.reply(DATA_END_TIMEOUT).await?;
     let o = outcome(&r, "5.0.0");
     Ok(End::Done(finish(outcomes, &o)))
+}
+
+/// The replies to MAIL, each RCPT, and DATA (if DATA was sent).
+struct Replies {
+    mail: Reply,
+    rcpt: Vec<Reply>,
+    data: Option<Reply>,
+}
+
+/// Without PIPELINING: one command at a time, stopping at the first
+/// reply that ends the transaction.
+async fn one_by_one<S>(
+    c: &mut Conversation<S>,
+    mail: &Command,
+    rcpts: &[(usize, Command)],
+) -> Result<Replies, Stop>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+{
+    let mail = c.command(mail, MAIL_TIMEOUT).await?;
+    let mut replies = Replies {
+        mail,
+        rcpt: Vec::with_capacity(rcpts.len()),
+        data: None,
+    };
+    if !replies.mail.is_positive() {
+        return Ok(replies);
+    }
+    for (_, cmd) in rcpts {
+        replies.rcpt.push(c.command(cmd, RCPT_TIMEOUT).await?);
+    }
+    if replies.rcpt.iter().any(Reply::is_positive) {
+        replies.data = Some(c.command(&Command::Data, DATA_INIT_TIMEOUT).await?);
+    }
+    Ok(replies)
+}
+
+/// With PIPELINING (RFC 2920 §3.1): MAIL, every RCPT and DATA in one
+/// group (DATA may only be last), then every reply, matched to its
+/// command by counting.
+async fn pipelined<S>(
+    c: &mut Conversation<S>,
+    mail: &Command,
+    rcpts: &[(usize, Command)],
+) -> Result<Replies, Stop>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+{
+    let mut group = mail.to_bytes();
+    let mut limits = vec![MAIL_TIMEOUT];
+    for (_, cmd) in rcpts {
+        group.extend_from_slice(&cmd.to_bytes());
+        limits.push(RCPT_TIMEOUT);
+    }
+    group.extend_from_slice(&Command::Data.to_bytes());
+    limits.push(DATA_INIT_TIMEOUT);
+    let (mut got, error) = c.pipeline(&group, &limits).await;
+    if let Some(e) = error {
+        // A refused MAIL (often 421 before closing) still decides the
+        // outcome; anything else means this host failed.
+        return match got.first() {
+            Some(m) if !m.is_positive() => Ok(Replies {
+                mail: got.swap_remove(0),
+                rcpt: Vec::new(),
+                data: None,
+            }),
+            _ => Err(e),
+        };
+    }
+    let data = got.pop();
+    let mut it = got.into_iter();
+    let Some(mail) = it.next() else {
+        return Err(Stop::Io("no reply to MAIL".into()));
+    };
+    Ok(Replies {
+        mail,
+        rcpt: it.collect(),
+        data,
+    })
+}
+
+/// Ends a transaction that won't send a message: if DATA was accepted
+/// anyway, RFC 2920 §3.1 says to send a single dot; otherwise RSET.
+/// Errors are ignored: the outcome is already decided.
+async fn abandon_data<S>(c: &mut Conversation<S>, data: Option<&Reply>)
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+{
+    if data.is_some_and(|r| r.code == 354) {
+        if c.send(b".\r\n", DATA_BLOCK_TIMEOUT).await.is_ok() {
+            let _ = c.reply(DATA_END_TIMEOUT).await;
+        }
+    } else {
+        let _ = c.command(&Command::Rset, COMMAND_TIMEOUT).await;
+    }
 }
