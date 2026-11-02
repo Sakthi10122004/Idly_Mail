@@ -137,8 +137,7 @@ grouped by development phase (see the roadmap in [README.md](README.md)).
   - Every DKIM key of the From domain signs, so mail is dual-signed with
     RSA and Ed25519.
   - Local recipients go straight to Maildir; remote recipients go to the
-    outbound queue. Outbound delivery itself arrives in the next milestone,
-    so until then remote mail waits in the queue.
+    outbound queue.
   - In test mode, remote recipients outside the allow-list are refused
     with `550 5.7.1` at RCPT time.
 - **Inbound SPF, DKIM and DMARC checks** on port 25, with our
@@ -150,6 +149,43 @@ grouped by development phase (see the roadmap in [README.md](README.md)).
     delivered and the result recorded.
   - An SPF fail alone never rejects; DMARC decides, and the SPF result is
     kept for spam scoring.
+- **Outbound delivery** (`smtp-client` crate), directly to each
+  recipient domain's MX. There is no relay or smarthost setting.
+  - MX hosts are tried in preference order, with equal preferences
+    shuffled (RFC 5321 §5.1). A domain without MX records is its own
+    host. A null MX (RFC 7505) fails at once with `5.1.10`, and a
+    domain that doesn't exist with `5.1.2`.
+  - All recipients at one domain go in one SMTP transaction. Each
+    recipient gets its own result: some can be refused while the rest
+    are delivered.
+  - TLS policy per MX host, strongest first:
+    - **DANE** (RFC 7672) when the MX and its TLSA records are
+      DNSSEC-signed: TLS is mandatory and the certificate must match a
+      TLSA record (DANE-EE or DANE-TA). There is never a plaintext
+      fallback.
+    - **MTA-STS** `enforce` (RFC 8461): only MX hosts listed in the
+      policy are used, over TLS with a certificate trusted by the
+      system's CAs. The policy is fetched over HTTPS (200 only, no
+      redirects, `text/plain`, at most 64 KiB, one-minute timeout),
+      cached for its `max_age`, and refetched when the TXT record's id
+      changes. A failed fetch keeps the cached policy and isn't retried
+      for five minutes.
+    - **Opportunistic STARTTLS** otherwise. If the TLS handshake fails,
+      Idly retries that server once without TLS.
+  - 8-bit mail goes to servers without 8BITMIME as quoted-printable
+    (RFC 6152). Mail that needs SMTPUTF8 fails with `5.6.7` at servers
+    without it (RFC 6531). The server's SIZE limit is respected (`5.3.4`).
+  - RFC 5321 §4.5.3.2 timeouts for every step.
+  - The queue now delivers: every 30 seconds it hands due messages to the
+    client.
+- **`server.outbound_ips`**: the addresses outbound mail is sent from, at
+  most one IPv4 and one IPv6. At startup, each must be assigned to the
+  server and have a PTR record naming `server.hostname` that resolves
+  back, or Idly refuses to start. When set, mail goes out only over the
+  listed families.
+- **Fuzz targets** `mta_sts` (policy and TXT parsing) and
+  `smtp_client_session`, which plays arbitrary server replies against
+  the client.
 - **New settings** in `[limits]`: `command_timeout`, `data_timeout`,
   `tls_handshake_timeout` (default 30 s), `session_timeout` (default
   30 min) and `max_connections`.
@@ -259,6 +295,18 @@ grouped by development phase (see the roadmap in [README.md](README.md)).
 - **A local domain without a DKIM key stops `idly serve` and
   `idly check-config`**, unless the domain sets `allow_unsigned = true`,
   which logs a warning. `--demo` is unaffected.
+- **Outbound connections never go to non-public addresses.** Whoever
+  controls a recipient domain's DNS could point its MX or A records at
+  127.0.0.1, a private network or a cloud metadata address. Idly refuses
+  to connect to:
+  - loopback, private (RFC 1918), carrier-grade NAT, link-local,
+    multicast, unspecified, documentation, benchmarking and reserved
+    addresses;
+  - any IPv6 address outside global unicast;
+  - IPv6 forms that embed IPv4 (mapped, NAT64, 6to4, Teredo).
+
+  If every MX address is refused, the message fails with `5.4.4`. The
+  same check covers the MTA-STS policy fetch.
 - **`hickory-recursor` is banned.** It has a cache-poisoning advisory,
   RUSTSEC-2026-0106, with no fixed release.
 

@@ -18,6 +18,10 @@
 //! - a long header line is folded at whitespace (RFC 5322 §2.2.3).
 //!
 //! A message without long lines is returned unchanged, byte for byte.
+//!
+//! The same walk also downgrades 8-bit mail to 7 bits ([`to_seven_bit`])
+//! for servers without 8BITMIME (RFC 6152 §3): 8-bit text leaves become
+//! quoted-printable and containers are relabelled 7bit (RFC 2045 §6.4).
 
 use std::borrow::Cow;
 
@@ -58,6 +62,26 @@ fn lines(b: &[u8]) -> impl Iterator<Item = &[u8]> {
     })
 }
 
+/// What the walk must achieve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Goal {
+    /// No line over 998 octets.
+    ShortLines,
+    /// Short lines and only 7-bit octets.
+    SevenBit,
+}
+
+impl Goal {
+    fn satisfied(self, b: &[u8]) -> bool {
+        !has_long_lines(b) && (self == Self::ShortLines || !is_eight_bit(b))
+    }
+}
+
+/// Whether `b` contains any octet above 127.
+pub fn is_eight_bit(b: &[u8]) -> bool {
+    b.iter().any(|&c| c >= 0x80)
+}
+
 /// Whether any line of `b` exceeds 998 octets.
 pub fn has_long_lines(b: &[u8]) -> bool {
     lines(b).any(|l| l.len() > MAX_LINE)
@@ -69,9 +93,24 @@ pub fn fix_long_lines(message: &[u8]) -> Result<Cow<'_, [u8]>, MimeError> {
     if !has_long_lines(message) {
         return Ok(Cow::Borrowed(message));
     }
-    let fixed = fix_entity(message, 0, true)?;
+    let fixed = fix_entity(message, 0, true, Goal::ShortLines)?;
     // The whole point: make sure we got it right.
     if has_long_lines(&fixed) {
+        return Err(MimeError::CannotReencode);
+    }
+    Ok(Cow::Owned(fixed))
+}
+
+/// Re-encodes `message` to 7-bit octets and short lines, for a server that
+/// lacks 8BITMIME (RFC 6152 §3). Returns the input unchanged (borrowed) if
+/// it already complies. 8-bit header fields can't be downgraded (that mail
+/// needs SMTPUTF8, RFC 6531) and give [`MimeError::CannotReencode`].
+pub fn to_seven_bit(message: &[u8]) -> Result<Cow<'_, [u8]>, MimeError> {
+    if Goal::SevenBit.satisfied(message) {
+        return Ok(Cow::Borrowed(message));
+    }
+    let fixed = fix_entity(message, 0, true, Goal::SevenBit)?;
+    if !Goal::SevenBit.satisfied(&fixed) {
         return Err(MimeError::CannotReencode);
     }
     Ok(Cow::Owned(fixed))
@@ -199,7 +238,7 @@ fn set_cte(headers: &[u8], cte: &str, top: bool) -> Vec<u8> {
     out
 }
 
-fn fix_entity(entity: &[u8], depth: usize, top: bool) -> Result<Vec<u8>, MimeError> {
+fn fix_entity(entity: &[u8], depth: usize, top: bool, goal: Goal) -> Result<Vec<u8>, MimeError> {
     if depth > MAX_DEPTH {
         return Err(MimeError::CannotReencode);
     }
@@ -221,18 +260,36 @@ fn fix_entity(entity: &[u8], depth: usize, top: bool) -> Result<Vec<u8>, MimeErr
     let cte = field("Content-Transfer-Encoding")
         .map(|v| String::from_utf8_lossy(v).trim().to_ascii_lowercase())
         .unwrap_or_default();
+    if goal == Goal::SevenBit && is_eight_bit(headers) {
+        // 8-bit header fields need SMTPUTF8 (RFC 6532); no encoding helps.
+        return Err(MimeError::CannotReencode);
+    }
     let mut headers = fold_headers(headers)?;
+    // RFC 2045 §6.4: a composite entity is labelled 8bit if anything inside
+    // is; once its contents are 7-bit, say so.
+    let relabel = |headers: &mut Vec<u8>| {
+        if goal == Goal::SevenBit && matches!(cte.as_str(), "8bit" | "binary") {
+            *headers = set_cte(headers, "7bit", top);
+        }
+    };
 
     let body: Vec<u8> = if media.starts_with("multipart/") && boundary.is_some() {
-        fix_multipart(body, boundary.as_deref().unwrap_or_default(), depth)?
-    } else if !has_long_lines(body) {
+        relabel(&mut headers);
+        fix_multipart(body, boundary.as_deref().unwrap_or_default(), depth, goal)?
+    } else if goal.satisfied(body) {
         body.to_vec()
     } else if media == "message/rfc822" || media == "message/global" {
         // RFC 2046 §5.2.1: message/rfc822 can't itself be encoded; fix the
         // message inside it instead.
-        fix_entity(body, depth + 1, false)?
+        relabel(&mut headers);
+        fix_entity(body, depth + 1, false, goal)?
     } else {
         match cte.as_str() {
+            // Encoded bodies are 7-bit by definition; 8-bit octets in one
+            // mean it is broken, and guessing would corrupt it.
+            "base64" | "quoted-printable" if is_eight_bit(body) => {
+                return Err(MimeError::CannotReencode);
+            }
             "base64" => rewrap_base64(body),
             "quoted-printable" => soft_break_qp(body),
             "" | "7bit" | "8bit" | "binary" => {
@@ -253,7 +310,12 @@ fn fix_entity(entity: &[u8], depth: usize, top: bool) -> Result<Vec<u8>, MimeErr
 /// RFC 2046 §5.1.1: parts are separated by lines `--boundary`, ended by
 /// `--boundary--`; each part is an entity. Preamble and epilogue are kept
 /// (their long lines are simply broken, since readers ignore them).
-fn fix_multipart(body: &[u8], boundary: &str, depth: usize) -> Result<Vec<u8>, MimeError> {
+fn fix_multipart(
+    body: &[u8],
+    boundary: &str,
+    depth: usize,
+    goal: Goal,
+) -> Result<Vec<u8>, MimeError> {
     let delim = format!("--{boundary}");
     let is_delim = |l: &[u8]| {
         l.strip_prefix(delim.as_bytes()).is_some_and(|rest| {
@@ -272,7 +334,7 @@ fn fix_multipart(body: &[u8], boundary: &str, depth: usize) -> Result<Vec<u8>, M
             }
             entity.extend_from_slice(l);
         }
-        let fixed = fix_entity(&entity, depth + 1, false)?;
+        let fixed = fix_entity(&entity, depth + 1, false, goal)?;
         out.extend_from_slice(&fixed);
         out.extend_from_slice(b"\r\n");
         part.clear();
@@ -294,7 +356,11 @@ fn fix_multipart(body: &[u8], boundary: &str, depth: usize) -> Result<Vec<u8>, M
         if in_part {
             part.push(line);
         } else {
-            // Preamble or epilogue: break long lines.
+            // Preamble or epilogue: break long lines. Nobody reads them, but
+            // 8-bit octets there can't be encoded.
+            if goal == Goal::SevenBit && is_eight_bit(line) {
+                return Err(MimeError::CannotReencode);
+            }
             for chunk in line.chunks(MAX_LINE) {
                 out.extend_from_slice(chunk);
                 out.extend_from_slice(b"\r\n");
@@ -504,5 +570,49 @@ mod tests {
     fn qp_round_trip_shape() {
         let enc = encode_qp(b"caf\xc3\xa9 = ok\t\r\n");
         assert_eq!(enc, b"caf=C3=A9 =3D ok=09\r\n");
+    }
+
+    #[test]
+    fn seven_bit_downgrade_of_plain_text() {
+        let msg = "From: a@example.org\r\nSubject: hi\r\n\r\nCaf\u{e9} cr\u{e8}me\r\n".as_bytes();
+        let out = to_seven_bit(msg).unwrap();
+        let text = std::str::from_utf8(&out).unwrap();
+        assert!(!is_eight_bit(&out));
+        assert!(text.contains("MIME-Version: 1.0\r\n"));
+        assert!(text.contains("Content-Transfer-Encoding: quoted-printable\r\n"));
+        assert!(text.ends_with("\r\n\r\nCaf=C3=A9 cr=C3=A8me\r\n"), "{text}");
+    }
+
+    #[test]
+    fn seven_bit_input_is_unchanged() {
+        let msg = b"From: a@example.org\r\n\r\nplain\r\n";
+        assert!(matches!(to_seven_bit(msg).unwrap(), Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn seven_bit_downgrade_relabels_multipart() {
+        let msg = "MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=b\r\n\
+Content-Transfer-Encoding: 8bit\r\n\r\n--b\r\nContent-Type: text/plain; charset=utf-8\r\n\
+Content-Transfer-Encoding: 8bit\r\n\r\n\u{fc}ber\r\n--b\r\nContent-Type: application/octet-stream\r\n\
+Content-Transfer-Encoding: base64\r\n\r\nAAAA\r\n--b--\r\n"
+            .as_bytes();
+        let out = to_seven_bit(msg).unwrap();
+        let text = std::str::from_utf8(&out).unwrap();
+        assert!(!is_eight_bit(&out));
+        assert!(
+            text.contains("boundary=b\r\nContent-Transfer-Encoding: 7bit\r\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Content-Transfer-Encoding: quoted-printable\r\n\r\n=C3=BCber\r\n"),
+            "{text}"
+        );
+        assert!(text.contains("base64\r\n\r\nAAAA\r\n"), "{text}");
+    }
+
+    #[test]
+    fn eight_bit_headers_cannot_be_downgraded() {
+        let msg = "From: Jos\u{e9} <j@example.org>\r\n\r\nx\r\n".as_bytes();
+        assert_eq!(to_seven_bit(msg), Err(MimeError::CannotReencode));
     }
 }

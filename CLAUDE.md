@@ -132,7 +132,12 @@ Principle: **lenient on harmless syntax, strict on framing.**
   and the demo path builds only the inbound server and the Maildir sink.
   `smtp-server` must never depend on the outbound client crate.
 - No relay, structurally: delivery targets come only from DNS
-  (`mx_targets`). No config key or flag may name a delivery host.
+  (`smtp-client`'s `route`). No config key or flag may name a delivery host.
+- Outbound connections only ever go to public unicast addresses
+  (`smtp_client::guard`, enforced inside the production `Direct` dialer,
+  for SMTP and MTA-STS fetches alike). Tests reach 127.0.0.1 only through
+  the `Loopback` dialer of the dev-only `testing` feature, never a config
+  key.
   `--test-mode` can only *restrict* delivery to an allow-list.
 
 ## Inbound authentication handling (maintainer-approved, milestone 6 implements)

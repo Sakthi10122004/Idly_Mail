@@ -42,6 +42,12 @@ pub(crate) struct Server {
     #[allow(dead_code)] // read by the startup checks (milestone 9)
     #[serde(default)]
     pub(crate) public_ips: Vec<IpAddr>,
+    /// Addresses outbound mail is sent from: at most one IPv4 and one IPv6,
+    /// each with a PTR record naming `hostname`. When set, mail is only
+    /// delivered over the families listed here. When empty, the system
+    /// picks the source address and both families are used.
+    #[serde(default)]
+    pub(crate) outbound_ips: Vec<IpAddr>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -338,6 +344,28 @@ impl Config {
         }
         if !self.server.data_dir.is_absolute() {
             bad("server.data_dir".into(), "must be an absolute path");
+        }
+
+        let v4 = self
+            .server
+            .outbound_ips
+            .iter()
+            .filter(|ip| ip.is_ipv4())
+            .count();
+        let v6 = self.server.outbound_ips.len() - v4;
+        if v4 > 1 || v6 > 1 {
+            bad(
+                "server.outbound_ips".into(),
+                "at most one IPv4 and one IPv6 address",
+            );
+        }
+        for (i, ip) in self.server.outbound_ips.iter().enumerate() {
+            if let Some(why) = smtp_client::guard::forbidden(*ip) {
+                bad(
+                    format!("server.outbound_ips[{i}]"),
+                    &format!("{ip} is not a public address ({why})"),
+                );
+            }
         }
 
         if self.domains.is_empty() {

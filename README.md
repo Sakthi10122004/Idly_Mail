@@ -6,9 +6,10 @@ to run on a 1 GB VPS with embedded storage, and the same binary is designed to
 scale out to a cluster later.
 
 > **Status:** Phase 1 in progress. Idly receives mail (with TLS and
-> SPF/DKIM/DMARC checks) and accepts authenticated submissions, which it
-> DKIM-signs and queues; it cannot deliver to other servers yet. A local,
-> receive-only demo is in [Try it locally](#try-it-locally). See
+> SPF/DKIM/DMARC checks), accepts authenticated submissions, DKIM-signs
+> them and delivers them directly to each recipient's MX (with DANE,
+> MTA-STS or opportunistic TLS). Not yet tested against real providers.
+> A local, receive-only demo is in [Try it locally](#try-it-locally). See
 > [Roadmap](#roadmap).
 
 ## The no-relay principle

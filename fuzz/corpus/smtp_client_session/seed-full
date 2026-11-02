@@ -1,0 +1,14 @@
+220 mx ESMTP
+250-mx
+250-8BITMIME
+250-SIZE 1000
+250-SMTPUTF8
+250 STARTTLS
+454 4.7.0 no tls
+250 ok
+250 ok
+550 5.1.1 no
+450 4.2.1 later
+354 go
+250 queued
+221 bye

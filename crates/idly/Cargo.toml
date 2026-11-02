@@ -12,6 +12,7 @@ publish.workspace = true
 clap.workspace = true
 smtp-proto.workspace = true
 smtp-server.workspace = true
+smtp-client.workspace = true
 queue.workspace = true
 dns.workspace = true
 mail-auth-glue.workspace = true
@@ -30,6 +31,7 @@ http-body-util.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+dns = { workspace = true, features = ["testing"] }
 
 [lints]
 workspace = true

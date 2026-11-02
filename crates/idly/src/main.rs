@@ -15,6 +15,7 @@ mod config;
 mod directory;
 mod dkim;
 mod metrics;
+mod outbound;
 
 use config::{Config, LogFormat};
 
@@ -320,6 +321,11 @@ async fn start(config: &Config, metrics: Arc<metrics::Metrics>) -> std::io::Resu
         None => None,
     };
     let resolver = dns::Recursive::new().map_err(|e| other("DNS resolver", &e))?;
+    // MTA-STS needs the system's trusted CAs (webpki-roots is banned).
+    let roots = smtp_client::system_roots().map_err(|e| other("TLS roots", &e))?;
+    outbound::check(config, &resolver)
+        .await
+        .map_err(|e| other("server.outbound_ips", &e))?;
     let accounts = accounts::ConfigAccounts::new(config).map_err(|e| other("accounts", &e))?;
     let dkim = dkim::load(config).map_err(|e| other("DKIM", &e))?;
     for d in &dkim.unsigned {
@@ -339,24 +345,37 @@ async fn start(config: &Config, metrics: Arc<metrics::Metrics>) -> std::io::Resu
     let mut queue_config = queue::QueueConfig::new(hostname);
     queue_config.min_free_space = config.limits.min_free_space;
     queue_config.test_mode_allow = test_mode_allow.clone();
-    let queue = queue::Queue::open(
-        &data.join("queue"),
-        queue_config,
-        Arc::new(queue::SystemClock),
-        probe.clone(),
-    )
-    .map_err(|e| other("queue", &e))?;
-    // Outbound delivery (smtp-client) arrives in milestone 7.
-    tracing::warn!(
-        "outbound delivery is not built yet: remote mail stays queued until milestone 7"
+    let queue = Arc::new(
+        queue::Queue::open(
+            &data.join("queue"),
+            queue_config,
+            Arc::new(queue::SystemClock),
+            probe.clone(),
+        )
+        .map_err(|e| other("queue", &e))?,
     );
+
+    // Outbound: direct to each domain's MX, never through a relay.
+    let (families, sources) = outbound::families_and_sources(config);
+    let mut client_config = smtp_client::ClientConfig::new(hostname, Arc::new(roots));
+    client_config.families = families;
+    client_config.sources = sources;
+    client_config.test_mode_allow = test_mode_allow.clone();
+    let client = smtp_client::Client::new(
+        client_config,
+        resolver.clone(),
+        smtp_client::Direct,
+        Arc::new(queue::SystemClock),
+    );
+    let runner = queue::Runner::new(queue.clone(), client, hostname);
+    tokio::spawn(runner.run(Duration::from_secs(30)));
 
     let mut listen_config = listener_config(config, true);
     listen_config.test_mode_allow = test_mode_allow;
     let sink = Delivery {
         maildir: Maildir::new(data.join("maildir"), hostname)
             .with_min_free_space(config.limits.min_free_space, probe),
-        queue: Arc::new(queue),
+        queue,
     };
     let mut server = Server::new(
         listen_config,

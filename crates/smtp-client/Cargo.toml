@@ -1,0 +1,40 @@
+[package]
+name = "smtp-client"
+description = "Direct-to-MX outbound SMTP delivery for Idly Mail (no relays)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[features]
+# The loopback test dialer. Never enabled in the release binary.
+testing = []
+
+[dependencies]
+smtp-proto.workspace = true
+dns.workspace = true
+queue.workspace = true
+mail-auth-glue.workspace = true
+rustls.workspace = true
+tokio-rustls.workspace = true
+rustls-pki-types.workspace = true
+rustls-native-certs.workspace = true
+ring.workspace = true
+hyper = { workspace = true, features = ["client"] }
+hyper-util.workspace = true
+http-body-util.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+# Integration tests use the loopback test dialer.
+smtp-client = { path = ".", features = ["testing"] }
+dns = { workspace = true, features = ["testing"] }
+rcgen.workspace = true
+tempfile.workspace = true
+hyper = { workspace = true, features = ["server"] }
+
+[lints]
+workspace = true

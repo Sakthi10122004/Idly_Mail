@@ -13,6 +13,11 @@ hostname = "mx.example.org"
 data_dir = "/var/lib/idly"
 # Public IP addresses, used to check PTR records. Leave empty to auto-detect.
 public_ips = []
+# Addresses outbound mail is sent from: at most one IPv4 and one IPv6. Each
+# must be assigned to this server and have a PTR record naming `hostname`
+# (checked at startup). When set, mail goes out only over the families
+# listed. Leave empty to let the system choose (both families).
+outbound_ips = []
 
 [listen]
 smtp = ["0.0.0.0:25", "[::]:25"]                 # inbound mail
