@@ -12,12 +12,14 @@ use clap::{Parser, Subcommand};
 
 mod accounts;
 mod certificates;
+mod checks;
 mod config;
 mod directory;
 mod dkim;
 mod metrics;
 mod mta_sts;
 mod outbound;
+mod records;
 mod tlsrpt;
 
 use config::{Config, LogFormat};
@@ -56,6 +58,37 @@ enum Command {
     Dkim {
         #[command(subcommand)]
         command: DkimCommand,
+    },
+    /// Print the DNS records the domains need; with --check, look them up.
+    Dns {
+        /// Only this domain (default: every [[domain]]).
+        #[arg(long)]
+        domain: Option<String>,
+        /// Look each record up with Idly's own resolver and compare; also
+        /// check reverse DNS and outbound port 25.
+        #[arg(long)]
+        check: bool,
+    },
+    /// Inspect and manage the outbound queue.
+    Queue {
+        #[command(subcommand)]
+        command: QueueCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum QueueCommand {
+    /// List every queued or held recipient.
+    List,
+    /// Retry a message now instead of waiting for its next attempt.
+    Retry {
+        /// The message id from `idly queue list`.
+        id: String,
+    },
+    /// Remove a message without delivering it or sending a bounce.
+    Drop {
+        /// The message id from `idly queue list`.
+        id: String,
     },
 }
 
@@ -131,6 +164,40 @@ fn main() -> ExitCode {
                 Err(e) => fail(&e),
             }
         }
+        Command::Dns { domain, check } => {
+            let config = match Config::load(&cli.config) {
+                Ok(c) => c,
+                Err(e) => return fail(&e),
+            };
+            let domains: Vec<String> = match domain {
+                Some(d) if !config.is_local_domain(&d) => {
+                    return fail(&format!("{d} is not one of the [[domain]] entries"));
+                }
+                Some(d) => vec![d],
+                None => config.domains.iter().map(|d| d.name.clone()).collect(),
+            };
+            let domains: Vec<String> = domains
+                .iter()
+                .map(|d| {
+                    smtp_proto::address::domain_to_ascii(d).unwrap_or_else(|_| d.to_lowercase())
+                })
+                .collect();
+            let runtime = match tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(r) => r,
+                Err(e) => return fail(&e),
+            };
+            runtime.block_on(dns_command(&config, &domains, check))
+        }
+        Command::Queue { command } => {
+            let config = match Config::load(&cli.config) {
+                Ok(c) => c,
+                Err(e) => return fail(&e),
+            };
+            queue_command(&config, command)
+        }
         Command::Serve { test_mode, demo } => {
             let mut config = match Config::load(&cli.config) {
                 Ok(c) => c,
@@ -181,6 +248,155 @@ fn hash_password() -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(e) => fail(&e),
+    }
+}
+
+/// `idly dns`: prints the records; with `check`, what DNS has now. Exits
+/// with 1 if a check found a problem.
+async fn dns_command(config: &Config, domains: &[String], check: bool) -> ExitCode {
+    let (tlsa, tlsa_note) = records::tlsa(config);
+    let inputs = records::Inputs {
+        ips: checks::public_ips(config),
+        tlsa,
+        tlsa_note,
+        dkim: records::dkim_records(&config.server.data_dir, domains),
+    };
+    let sections = records::plan(config, domains, &inputs);
+    if !check {
+        print!("{}", records::render(&sections, None, &[]));
+        println!("; Publish these, then run `idly dns --check` to verify them.");
+        return ExitCode::SUCCESS;
+    }
+    let resolver = match dns::Recursive::new() {
+        Ok(r) => r,
+        Err(e) => return fail(&e),
+    };
+    let mut statuses = Vec::new();
+    let mut problems = 0;
+    for section in &sections {
+        let mut found = Vec::new();
+        for record in &section.records {
+            let status = records::check(&resolver, record).await;
+            if status != records::Status::Ok {
+                problems += 1;
+            }
+            found.push(status);
+        }
+        statuses.push(found);
+    }
+    let mut zones = Vec::new();
+    for d in domains {
+        zones.push((d.clone(), records::dnssec(&resolver, d).await));
+    }
+    print!("{}", records::render(&sections, Some(&statuses), &zones));
+
+    println!("; outside checks");
+    if inputs.ips.is_empty() {
+        problems += 1;
+        println!("[PROBLEM] no public IP address found; set server.public_ips");
+    }
+    for p in checks::reverse_dns(&resolver, &config.server.hostname, &inputs.ips).await {
+        problems += 1;
+        println!("[PROBLEM] {p}");
+    }
+    if config.checks.port25_probe {
+        let (_, sources) = outbound::families_and_sources(config);
+        match checks::probe_port25(
+            &resolver,
+            &smtp_client::Direct,
+            sources,
+            &config.checks.probe_domains,
+            checks::PROBE_TIMEOUT,
+        )
+        .await
+        {
+            checks::Port25::Open(via) => println!("[OK] outbound port 25 is open ({via})"),
+            checks::Port25::Blocked => {
+                problems += 1;
+                println!(
+                    "[PROBLEM] outbound port 25 seems blocked: every probe timed out. Ask your provider to open it."
+                );
+            }
+            checks::Port25::Unknown(why) => {
+                problems += 1;
+                println!("[UNKNOWN] outbound port 25: {why}");
+            }
+        }
+    }
+    if problems == 0 {
+        println!("\nEverything checks out.");
+        ExitCode::SUCCESS
+    } else {
+        println!("\n{problems} item(s) need attention.");
+        ExitCode::from(1)
+    }
+}
+
+/// `idly queue ...`. While `idly serve` runs it owns the queue, so the
+/// command attaches to it instead (no crash recovery).
+fn queue_command(config: &Config, command: QueueCommand) -> ExitCode {
+    let dir = config.server.data_dir.join("queue");
+    if !dir.join("queue.db").exists() {
+        println!("The queue is empty (no queue in {} yet).", dir.display());
+        return ExitCode::SUCCESS;
+    }
+    let qc = queue::QueueConfig::new(&config.server.hostname);
+    let clock = Arc::new(queue::SystemClock);
+    let space = Arc::new(queue::space::Statvfs);
+    let queue = match queue::Queue::open(&dir, qc.clone(), clock.clone(), space.clone()) {
+        Err(queue::QueueError::Busy) => queue::Queue::attach(&dir, qc, clock, space),
+        other => other,
+    };
+    let queue = match queue {
+        Ok(q) => q,
+        Err(e) => return fail(&e),
+    };
+    match command {
+        QueueCommand::List => {
+            if config.test_mode.enabled {
+                println!(
+                    "TEST MODE is on: mail is delivered only to {}; everything else is held.\n",
+                    config.test_mode.allow_domains.join(", ")
+                );
+            }
+            let entries = match queue.list() {
+                Ok(e) => e,
+                Err(e) => return fail(&e),
+            };
+            for e in &entries {
+                let next = std::time::UNIX_EPOCH + Duration::from_secs(e.next_attempt);
+                println!(
+                    "{}  {:<6}  attempts={}  next={}  <{}> -> {}",
+                    e.message_id,
+                    e.status,
+                    e.attempts,
+                    smtp_proto::date::rfc5322(next),
+                    e.sender.as_deref().unwrap_or(""),
+                    e.recipient
+                );
+                if let Some(err) = &e.last_error {
+                    println!("    last error: {err}");
+                }
+            }
+            println!("{} recipient(s) in the queue", entries.len());
+            ExitCode::SUCCESS
+        }
+        QueueCommand::Retry { id } => match queue.retry_now(&id) {
+            Ok(0) => fail(&format!("{id}: no queued recipients to retry")),
+            Ok(n) => {
+                println!("{id}: {n} recipient(s) due now");
+                ExitCode::SUCCESS
+            }
+            Err(e) => fail(&e),
+        },
+        QueueCommand::Drop { id } => match queue.drop_message(&id) {
+            Ok(true) => {
+                println!("{id}: dropped");
+                ExitCode::SUCCESS
+            }
+            Ok(false) => fail(&format!("{id}: no such message")),
+            Err(e) => fail(&e),
+        },
     }
 }
 
@@ -326,12 +542,21 @@ async fn start(config: &Config, metrics: Arc<metrics::Metrics>) -> std::io::Resu
         families,
         sources,
     );
-    let tls = match certificates::start(config, &metrics, https).await? {
-        Some(certs) => {
-            Some(smtp_server::tls::server_config_with(certs).map_err(|e| other("TLS", &e))?)
-        }
+    let certs = certificates::start(config, &metrics, https).await?;
+    let tls = match &certs {
+        Some(certs) => Some(
+            smtp_server::tls::server_config_with(certs.clone()).map_err(|e| other("TLS", &e))?,
+        ),
         None => None,
     };
+    // Reverse DNS, outbound port 25 and certificate expiry: warnings only.
+    tokio::spawn(checks::run(
+        config.clone(),
+        resolver.clone(),
+        sources,
+        metrics.clone(),
+        certs,
+    ));
     outbound::check(config, &resolver)
         .await
         .map_err(|e| other("server.outbound_ips", &e))?;

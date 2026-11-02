@@ -30,6 +30,10 @@ pub(crate) struct Metrics {
     pub(crate) auth_failures: Counter,
     /// notAfter of the certificate in use, in Unix seconds (0: none).
     pub(crate) certificate_expiry: Gauge,
+    /// Outbound port 25: 1 open, 0 blocked, -1 unknown or not checked.
+    pub(crate) port25_open: Gauge,
+    /// Reverse-DNS problems found for our public addresses.
+    pub(crate) reverse_dns_problems: Gauge,
 }
 
 impl Metrics {
@@ -40,6 +44,9 @@ impl Metrics {
         let messages_accepted = Counter::default();
         let auth_failures = Counter::default();
         let certificate_expiry = Gauge::default();
+        let port25_open = Gauge::default();
+        port25_open.set(-1);
+        let reverse_dns_problems = Gauge::default();
         registry.register(
             "test_mode",
             "1 while test mode restricts outbound delivery",
@@ -65,6 +72,16 @@ impl Metrics {
             "When the TLS certificate in use expires (Unix time); 0 for none or self-signed",
             certificate_expiry.clone(),
         );
+        registry.register(
+            "outbound_port25_open",
+            "Outbound port 25 reachable: 1 yes, 0 blocked, -1 unknown",
+            port25_open.clone(),
+        );
+        registry.register(
+            "reverse_dns_problems",
+            "PTR/forward-DNS problems found for our public addresses",
+            reverse_dns_problems.clone(),
+        );
         Arc::new(Self {
             registry,
             test_mode,
@@ -72,6 +89,8 @@ impl Metrics {
             messages_accepted,
             auth_failures,
             certificate_expiry,
+            port25_open,
+            reverse_dns_problems,
         })
     }
 

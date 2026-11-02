@@ -235,6 +235,33 @@ grouped by development phase (see the roadmap in [README.md](README.md)).
   configurable `max_age`. The policy id for the `_mta-sts` TXT record is
   printed at startup and changes whenever the policy does.
 - **Metric** `idly_tls_certificate_expiry_timestamp_seconds`.
+- **`idly dns [--domain D] [--check]`** prints every DNS record the
+  domains need, in zone-file form: MX, SPF (`v=spf1 mx -all`), each DKIM
+  key, DMARC, TLS-RPT (`_smtp._tls`), MTA-STS (`_mta-sts` with the current
+  policy id, and `mta-sts.<domain>`), the mail host's A/AAAA, the DANE
+  TLSA record (`3 1 1`, from the certificate key), and the PTR records to
+  set at the hosting provider. Long TXT values are split into strings of at
+  most 255 octets.
+  - With `--check`, each record is looked up through Idly's own resolver
+    and marked OK, MISSING, MISMATCH or UNKNOWN. SPF is checked by
+    evaluating it for our addresses. A TLSA record outside a
+    DNSSEC-signed zone is flagged, and each zone's DNSSEC status is shown.
+    It also checks reverse DNS and outbound port 25. The exit code is 1
+    when anything needs attention.
+- **Checks while serving** (new `[checks]` section), at startup and every 6
+  hours. They only warn, never stop the server:
+  - Reverse DNS: each public address needs a PTR naming `server.hostname`,
+    and the name must resolve back to it. Addresses come from
+    `server.public_ips` and `outbound_ips`, or are detected.
+  - Outbound port 25: connects to the MX of `probe_domains` (default
+    gmail.com, outlook.com, yahoo.com), reads the banner and says QUIT,
+    like a delivery would. If every probe times out, the provider most
+    likely blocks port 25, and the warning says so.
+  - The certificate expiring within 14 days.
+  - Metrics: `idly_outbound_port25_open`, `idly_reverse_dns_problems`.
+- **`idly queue list|retry <id>|drop <id>`**: list queued and held
+  recipients (with a banner in test mode), retry a message now, or remove
+  it without a bounce. These commands also work while `idly serve` runs.
 - **Fuzz target** `cert_inspect` (reading certificate chains).
 - **`server.outbound_ips`**: the addresses outbound mail is sent from, at
   most one IPv4 and one IPv6. At startup, each must be assigned to the
@@ -296,6 +323,11 @@ grouped by development phase (see the roadmap in [README.md](README.md)).
   decide the result; unused signatures are ignored.
 
 #### Security
+- **Only one process can own the queue.** `idly serve` holds an exclusive
+  lock on `<data_dir>/queue/lock`, so a second server on the same data
+  directory refuses to start. Its crash recovery could otherwise delete
+  the spool file of a message the first server is just accepting.
+  `idly queue` commands attach without running recovery.
 - **ACME traffic uses our own resolver and the outbound address guard**,
   like SMTP: the CA's URLs must be `https://`, certificates are checked
   against the system roots, and a CA name resolving to a private address

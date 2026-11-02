@@ -98,6 +98,15 @@ impl Store {
     }
 }
 
+/// The DER SubjectPublicKeyInfo of a PEM private key (for the TLSA
+/// record `idly dns` prints).
+pub fn public_key(pem: &str) -> Result<Vec<u8>, String> {
+    use rcgen::PublicKeyData;
+    KeyPair::from_pem(pem)
+        .map(|k| k.subject_public_key_info())
+        .map_err(|e| e.to_string())
+}
+
 /// Replaces `path` with `data`, durably.
 fn write_atomic(path: &Path, data: &[u8], mode: u32) -> io::Result<()> {
     let dir = path.parent().unwrap_or(Path::new("."));

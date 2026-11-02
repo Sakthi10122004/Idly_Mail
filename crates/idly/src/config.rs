@@ -34,6 +34,8 @@ pub(crate) struct Config {
     #[serde(default)]
     pub(crate) tls_reporting: TlsReporting,
     #[serde(default)]
+    pub(crate) checks: Checks,
+    #[serde(default)]
     pub(crate) log: Log,
 }
 
@@ -45,7 +47,6 @@ pub(crate) struct Server {
     /// Where queue, spool, Maildir and keys live. Must be absolute.
     pub(crate) data_dir: PathBuf,
     /// Public IP addresses, for PTR checks. Auto-detected when empty.
-    #[allow(dead_code)] // read by the startup checks (milestone 9)
     #[serde(default)]
     pub(crate) public_ips: Vec<IpAddr>,
     /// Addresses outbound mail is sent from: at most one IPv4 and one IPv6,
@@ -326,6 +327,41 @@ pub(crate) struct TestMode {
     pub(crate) enabled: bool,
     #[serde(default)]
     pub(crate) allow_domains: Vec<String>,
+}
+
+/// Checks of the outside world, at startup and every 6 hours. They only
+/// warn (logs and metrics).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Checks {
+    /// Check that our public addresses have PTR records naming our host.
+    #[serde(default = "default_true")]
+    pub(crate) reverse_dns: bool,
+    /// Connect to port 25 of these domains' MX (banner, then QUIT) to see
+    /// whether the hosting provider blocks outbound mail.
+    #[serde(default = "default_true")]
+    pub(crate) port25_probe: bool,
+    #[serde(default = "default_probe_domains")]
+    pub(crate) probe_domains: Vec<String>,
+}
+
+impl Default for Checks {
+    fn default() -> Self {
+        Self {
+            reverse_dns: true,
+            port25_probe: true,
+            probe_domains: default_probe_domains(),
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+fn default_probe_domains() -> Vec<String> {
+    ["gmail.com", "outlook.com", "yahoo.com"]
+        .map(String::from)
+        .to_vec()
 }
 
 /// Daily SMTP TLS reports (RFC 8460) to domains that ask for them.
@@ -723,6 +759,15 @@ impl Config {
                 "tls_reporting.organization".into(),
                 "must be a non-empty name of at most 200 characters",
             );
+        }
+
+        for (i, d) in self.checks.probe_domains.iter().enumerate() {
+            if domain_ascii(d).is_none() {
+                bad(
+                    format!("checks.probe_domains[{i}]"),
+                    "not a valid domain name",
+                );
+            }
         }
 
         if tracing_subscriber::EnvFilter::try_new(&self.log.level).is_err() {

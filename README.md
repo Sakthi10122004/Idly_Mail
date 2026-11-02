@@ -46,8 +46,10 @@ Direct delivery only works if your server is a good citizen on the internet:
   it by default; pick a VPS provider that allows it, or ask them to unblock it.
 - **Reverse DNS (PTR)** for your server's IP must match its hostname, and that
   hostname must resolve back to the IP.
-- **DNS records**: MX, SPF, DKIM, DMARC and MTA-STS. From Phase 1, `idly dns`
-  prints every record you need to create.
+- **DNS records**: MX, SPF, DKIM, DMARC, MTA-STS, TLS-RPT and (with DNSSEC)
+  DANE. `idly dns` prints every record you need to create, and
+  `idly dns --check` looks them up and checks PTR records and outbound port
+  25 too.
 - **A clean IP address.** Check that your IP is not on public blocklists before
   you start sending.
 

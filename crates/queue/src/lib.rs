@@ -106,6 +106,8 @@ impl Clock for SystemClock {
 pub enum QueueError {
     /// Free space is below the floor: reply 452 4.3.1.
     NoSpace,
+    /// Another process (a running `idly serve`) has the queue open.
+    Busy,
     Io(std::io::Error),
     Db(String),
     /// Test-only: a simulated crash.
@@ -117,6 +119,7 @@ impl std::fmt::Display for QueueError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NoSpace => f.write_str("insufficient system storage"),
+            Self::Busy => f.write_str("the queue is in use by another idly process"),
             Self::Io(e) => write!(f, "spool I/O error: {e}"),
             Self::Db(e) => write!(f, "queue database error: {e}"),
             #[cfg(test)]
@@ -214,6 +217,9 @@ pub(crate) enum CrashPoint {
 /// The queue.
 pub struct Queue {
     db: Mutex<Connection>,
+    /// The exclusive lock on `<dir>/lock`, held while the queue is open
+    /// for delivery; None when attached by a command-line tool.
+    _lock: Option<std::fs::File>,
     spool: PathBuf,
     config: QueueConfig,
     clock: Arc<dyn Clock>,
@@ -291,6 +297,9 @@ fn sync_dir(dir: &Path) -> std::io::Result<()> {
 
 impl Queue {
     /// Opens (or creates) the queue in `dir` and recovers from any crash.
+    /// Only one process may have it open: recovery would delete the spool
+    /// file of a message another process is just accepting. A second
+    /// open fails with [`QueueError::Busy`].
     pub fn open(
         dir: &Path,
         config: QueueConfig,
@@ -299,19 +308,65 @@ impl Queue {
     ) -> Result<Self, QueueError> {
         let spool = dir.join("spool");
         std::fs::create_dir_all(spool.join("tmp"))?;
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(dir.join("lock"))?;
+        rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive).map_err(
+            |e| {
+                if e == rustix::io::Errno::WOULDBLOCK {
+                    QueueError::Busy
+                } else {
+                    QueueError::Io(e.into())
+                }
+            },
+        )?;
+        let q = Self::connect(dir, config, clock, space, Some(lock))?;
+        q.recover()?;
+        Ok(q)
+    }
+
+    /// Opens an existing queue that a running server may also have open,
+    /// for `idly queue` commands: no lock and no crash recovery, only
+    /// listing and the operator actions, which SQLite keeps consistent.
+    pub fn attach(
+        dir: &Path,
+        config: QueueConfig,
+        clock: Arc<dyn Clock>,
+        space: Arc<dyn SpaceProbe>,
+    ) -> Result<Self, QueueError> {
+        if !dir.join("queue.db").exists() {
+            return Err(QueueError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("no queue in {}", dir.display()),
+            )));
+        }
+        Self::connect(dir, config, clock, space, None)
+    }
+
+    fn connect(
+        dir: &Path,
+        config: QueueConfig,
+        clock: Arc<dyn Clock>,
+        space: Arc<dyn SpaceProbe>,
+        lock: Option<std::fs::File>,
+    ) -> Result<Self, QueueError> {
+        let spool = dir.join("spool");
         let db = Connection::open(dir.join("queue.db"))?;
+        // A command-line tool and the server may write at the same time.
+        db.busy_timeout(std::time::Duration::from_secs(5))?;
         db.execute_batch(SCHEMA)?;
         migrate(&db)?;
-        let q = Self {
+        Ok(Self {
             db: Mutex::new(db),
+            _lock: lock,
             spool,
             config,
             clock,
             space,
             counter: AtomicU64::new(0),
-        };
-        q.recover()?;
-        Ok(q)
+        })
     }
 
     /// The configuration.

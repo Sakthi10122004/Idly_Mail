@@ -36,6 +36,8 @@ http-body-util.workspace = true
 tempfile.workspace = true
 rcgen.workspace = true
 dns = { workspace = true, features = ["testing"] }
+smtp-client = { workspace = true, features = ["testing"] }
+base64.workspace = true
 
 [lints]
 workspace = true

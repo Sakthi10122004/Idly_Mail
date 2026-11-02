@@ -108,6 +108,17 @@ enabled = false
 # from = "tlsrpt@example.org"
 # organization = "Example Org"   # default: server.hostname
 
+# Checks of the outside world, at startup and every 6 hours; they only warn
+# (logs and the idly_outbound_port25_open / idly_reverse_dns_problems
+# metrics). The PTR records of server.public_ips (or the detected address)
+# must name server.hostname. The port-25 probe connects to these domains'
+# MX, reads the banner and says QUIT, like a delivery would, to find out
+# whether your provider blocks outbound mail.
+[checks]
+reverse_dns = true
+port25_probe = true
+probe_domains = ["gmail.com", "outlook.com", "yahoo.com"]
+
 [log]
 format = "json"   # or "text" for a terminal
 level = "info"

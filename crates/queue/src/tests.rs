@@ -515,3 +515,44 @@ async fn older_databases_gain_the_kind_column() {
     drop(q);
     h.open();
 }
+
+#[test]
+fn one_process_owns_the_queue_and_tools_attach() {
+    let h = Harness::new();
+    let q = h.open();
+    q.enqueue(Some("alice@example.org"), &rcpts(&["bob@example.net"]), MSG)
+        .unwrap();
+    // A second owner (another `idly serve`) is refused: its recovery
+    // could delete a spool file the first one is about to commit.
+    let second = Queue::open(
+        h.dir.path(),
+        h.config.clone(),
+        h.clock.clone(),
+        h.space.clone(),
+    );
+    assert!(matches!(second, Err(QueueError::Busy)), "{second:?}");
+    // A command-line tool attaches without recovery and sees the mail.
+    let tool = Queue::attach(
+        h.dir.path(),
+        h.config.clone(),
+        h.clock.clone(),
+        h.space.clone(),
+    )
+    .unwrap();
+    assert_eq!(tool.list().unwrap().len(), 1);
+    drop(tool);
+    drop(q);
+    // Once the owner is gone, the queue can be opened again.
+    assert_eq!(h.open().list().unwrap().len(), 1);
+    // Attaching never creates a queue.
+    let empty = tempfile::tempdir().unwrap();
+    assert!(
+        Queue::attach(
+            empty.path(),
+            h.config.clone(),
+            h.clock.clone(),
+            h.space.clone()
+        )
+        .is_err()
+    );
+}
