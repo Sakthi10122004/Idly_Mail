@@ -18,6 +18,7 @@ base64.workspace = true
 rsa.workspace = true
 rand_core.workspace = true
 tokio.workspace = true
+encoding_rs.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

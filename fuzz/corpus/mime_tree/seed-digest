@@ -1,0 +1,9 @@
+Content-Type: multipart/digest; boundary=d
+
+--d
+
+Subject: one
+From: "A, B" <a@b.c>, g: x@y;
+
+x
+--d--

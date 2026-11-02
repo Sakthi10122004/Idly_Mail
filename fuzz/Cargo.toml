@@ -144,3 +144,10 @@ path = "fuzz_targets/cert_inspect.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "mime_tree"
+path = "fuzz_targets/mime_tree.rs"
+test = false
+doc = false
+bench = false

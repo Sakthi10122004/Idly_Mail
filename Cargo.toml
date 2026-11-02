@@ -43,6 +43,8 @@ rsa = { version = "0.9", default-features = false, features = ["std", "pem"] }
 rand_core = { version = "0.6", default-features = false, features = ["getrandom"] }
 hickory-resolver = { version = "=0.26.3", default-features = false, features = ["recursor", "dnssec-ring", "tokio"] }
 tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread", "macros", "net", "time", "sync", "io-util", "signal", "fs"] }
+# Legacy charsets in mail (ISO-8859-*, Shift_JIS, ...) for IMAP/JMAP.
+encoding_rs = "0.8"
 idna = { version = "1", default-features = false, features = ["std", "compiled_data"] }
 clap = { version = "4", default-features = false, features = ["std", "help", "usage", "error-context", "derive"] }
 serde = { version = "1", features = ["derive"] }

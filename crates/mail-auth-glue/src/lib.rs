@@ -11,4 +11,5 @@ pub mod dmarc;
 pub mod message;
 pub mod mime;
 pub mod spf;
+pub mod structure;
 pub mod tags;
