@@ -95,8 +95,11 @@ pub(crate) async fn route<R: Resolver>(
 
     let mut hosts = Vec::new();
     let mut temporary = None;
+    // A Bogus address answer is accepted as insecure only for the hosts
+    // of an explicit MX RRset that was itself insecure.
+    let tolerate_bogus = !implicit && !mx_secure;
     for name in names {
-        match addresses(resolver, &name, families).await {
+        match addresses(resolver, &name, families, tolerate_bogus).await {
             Ok((addrs, secure)) if !addrs.is_empty() => hosts.push(Host {
                 name,
                 addrs,
@@ -130,10 +133,20 @@ pub(crate) async fn route<R: Resolver>(
 
 /// A and AAAA records of `name` for the enabled families. Not-found is an
 /// empty list; other failures are errors.
+///
+/// With `tolerate_bogus`, a Bogus answer is used as insecure. That is only
+/// passed for the hosts of an MX RRset that was not DNSSEC-secure: whoever
+/// could forge these addresses could forge that unsigned MX RRset just as
+/// well, so nothing is lost, and DANE never applies without a secure MX
+/// (RFC 7672 §2.2.1). It works around hickory-resolver 0.26.3 calling
+/// some unsigned delegations Bogus, such as l.google.com, where Gmail's
+/// MX hosts live. Secure MX RRsets and implicit MX (the domain's own
+/// address records) stay strict.
 async fn addresses<R: Resolver>(
     resolver: &R,
     name: &str,
     families: Families,
+    tolerate_bogus: bool,
 ) -> Result<(Vec<IpAddr>, bool), Error> {
     let mut addrs = Vec::new();
     let mut secure = true;
@@ -142,11 +155,18 @@ async fn addresses<R: Resolver>(
         if !enabled {
             continue;
         }
-        let result = if v6 {
+        let mut result = if v6 {
             resolver.aaaa(name).await
         } else {
             resolver.a(name).await
         };
+        if tolerate_bogus && result == Err(Error::Bogus) {
+            tracing::warn!(
+                host = name,
+                "DNSSEC validation failed for an MX host of an unsigned MX RRset; using its addresses as unsigned"
+            );
+            result = resolver.addresses_despite_bogus(name, v6).await;
+        }
         match result {
             Ok(answer) => {
                 any = true;
@@ -268,6 +288,40 @@ mod tests {
             route(&r, "example.com", BOTH).await,
             Err(RouteError::Temporary(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn bogus_hosts_of_an_unsigned_mx_are_used_as_unsigned() {
+        let r = StaticResolver::new()
+            .with_mx("gmail.example", 5, "mx.l.google.example")
+            .with_ip("mx.l.google.example", ip("192.0.2.9"))
+            .with_bogus_addresses("mx.l.google.example");
+        let route = route(&r, "gmail.example", BOTH).await.unwrap();
+        assert_eq!(route.hosts[0].addrs, [ip("192.0.2.9")]);
+        assert!(!route.mx_secure && !route.hosts[0].addrs_secure);
+    }
+
+    #[tokio::test]
+    async fn bogus_stays_fatal_for_a_secure_mx_and_implicit_mx() {
+        // A signed MX RRset pointing at a Bogus host: possibly an attack
+        // on DANE, so the host is not used.
+        let signed = StaticResolver::new()
+            .secure(true)
+            .with_mx("signed.example", 10, "mx.signed.example")
+            .with_ip("mx.signed.example", ip("192.0.2.10"))
+            .with_bogus_addresses("mx.signed.example");
+        assert!(matches!(
+            route(&signed, "signed.example", BOTH).await,
+            Err(RouteError::Temporary(e)) if e.contains("DNSSEC")
+        ));
+        assert!(!signed.queries().iter().any(|q| q.contains('!')));
+        // No MX: the domain's own addresses decide DANE, so Bogus stays
+        // fatal there too.
+        let implicit = StaticResolver::new()
+            .with_ip("nomx.example", ip("192.0.2.11"))
+            .with_bogus_addresses("nomx.example");
+        assert!(route(&implicit, "nomx.example", BOTH).await.is_err());
+        assert!(!implicit.queries().iter().any(|q| q.contains('!')));
     }
 
     #[tokio::test]

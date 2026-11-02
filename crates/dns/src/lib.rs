@@ -128,6 +128,28 @@ pub trait Resolver: Send + Sync {
     fn tlsa(&self, name: &str) -> impl Future<Output = Result<Answer<Tlsa>, Error>> + Send;
     /// PTR names for `ip`.
     fn ptr(&self, ip: IpAddr) -> impl Future<Output = Result<Answer<String>, Error>> + Send;
+
+    /// A (or, with `v6`, AAAA) records of `name` even when DNSSEC
+    /// validation calls them Bogus; such records come back marked
+    /// Insecure. Only for a caller that would accept an unsigned answer
+    /// for this name anyway: the outbound router, for the hosts of an MX
+    /// RRset that was itself not secure (see smtp-client's `route`). Never
+    /// for DANE, where Bogus must stay fatal (RFC 7672 §2.2.2).
+    ///
+    /// The default is the plain lookup; only the real resolver differs.
+    fn addresses_despite_bogus(
+        &self,
+        name: &str,
+        v6: bool,
+    ) -> impl Future<Output = Result<Answer<IpAddr>, Error>> + Send {
+        async move {
+            if v6 {
+                self.aaaa(name).await
+            } else {
+                self.a(name).await
+            }
+        }
+    }
 }
 
 /// Normalizes a returned name: lower-case, without the trailing dot.

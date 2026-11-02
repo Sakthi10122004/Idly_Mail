@@ -57,6 +57,17 @@ impl Recursive {
     }
 
     async fn query(&self, name: Name, rtype: RecordType) -> Result<(Vec<RData>, Dnssec), Error> {
+        self.query_with(name, rtype, false).await
+    }
+
+    /// With `allow_bogus`, records that failed validation are returned
+    /// as Insecure instead of failing the lookup.
+    async fn query_with(
+        &self,
+        name: Name,
+        rtype: RecordType,
+        allow_bogus: bool,
+    ) -> Result<(Vec<RData>, Dnssec), Error> {
         let query = Query::query(name, rtype);
         let message = match self.inner.resolve(query, Instant::now(), true).await {
             Ok(m) => m,
@@ -64,7 +75,21 @@ impl Recursive {
             Err(e) if e.is_no_records_found() => return Err(Error::NoRecords),
             Err(e) => return Err(Error::Temporary(e.to_string())),
         };
-        classify(&message.answers, rtype)
+        match classify(&message.answers, rtype) {
+            Err(Error::Bogus) if allow_bogus => {
+                let data: Vec<RData> = message
+                    .answers
+                    .iter()
+                    .filter(|r| r.record_type() == rtype)
+                    .map(|r| r.data.clone())
+                    .collect();
+                if data.is_empty() {
+                    return Err(Error::Bogus);
+                }
+                Ok((data, Dnssec::Insecure))
+            }
+            other => other,
+        }
     }
 }
 
@@ -173,6 +198,16 @@ impl Resolver for Recursive {
         })
     }
 
+    async fn addresses_despite_bogus(&self, name: &str, v6: bool) -> Result<Answer<IpAddr>, Error> {
+        let rtype = if v6 { RecordType::AAAA } else { RecordType::A };
+        let r = self.query_with(fqdn(name)?, rtype, true).await?;
+        answer(r, |d| match d {
+            RData::A(a) => Some(IpAddr::V4(a.0)),
+            RData::AAAA(a) => Some(IpAddr::V6(a.0)),
+            _ => None,
+        })
+    }
+
     async fn ptr(&self, ip: IpAddr) -> Result<Answer<String>, Error> {
         // RFC 1035 §3.5 (in-addr.arpa) and RFC 3596 §2.5 (ip6.arpa).
         let r = self.query(Name::from(ip), RecordType::PTR).await?;
@@ -248,6 +283,26 @@ mod tests {
             );
             let ptr = r.ptr("8.8.8.8".parse().unwrap()).await.unwrap();
             assert_eq!(ptr.records, vec!["dns.google".to_owned()]);
+        });
+    }
+
+    #[test]
+    #[ignore = "needs network"]
+    fn live_gmail_mx_hosts_despite_hickory_bogus() {
+        rt().block_on(async {
+            let r = Recursive::new().unwrap();
+            // hickory 0.26.3 calls names under the unsigned l.google.com
+            // delegation Bogus. If this starts passing as Insecure, the
+            // upstream bug is fixed and the route workaround is unused.
+            let host = "gmail-smtp-in.l.google.com";
+            match r.a(host).await {
+                Err(Error::Bogus) => {}
+                Ok(a) => assert_eq!(a.dnssec, Dnssec::Insecure),
+                Err(e) => panic!("{e:?}"),
+            }
+            let a = r.addresses_despite_bogus(host, false).await.unwrap();
+            assert!(!a.records.is_empty());
+            assert_eq!(a.dnssec, Dnssec::Insecure);
         });
     }
 

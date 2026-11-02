@@ -84,13 +84,23 @@ pub(crate) async fn probe_port25<R: Resolver, D: Dialer>(
 
 async fn first_mx_address<R: Resolver>(resolver: &R, domain: &str) -> Result<IpAddr, String> {
     let mx = resolver.mx(domain).await.map_err(|e| e.to_string())?;
-    let mut hosts: Vec<_> = mx.records.into_iter().filter(|m| !m.is_null()).collect();
+    let mut hosts: Vec<_> = mx
+        .records
+        .iter()
+        .filter(|m| !m.is_null())
+        .cloned()
+        .collect();
     hosts.sort_by_key(|m| m.preference);
     let host = hosts.first().ok_or("null MX")?;
-    let a = resolver
-        .a(&host.exchange)
-        .await
-        .map_err(|e| format!("{}: {e}", host.exchange))?;
+    let mut a = resolver.a(&host.exchange).await;
+    // The same rule as delivery (smtp-client's route): hosts of an
+    // unsigned MX RRset may be used despite a Bogus verdict.
+    if a == Err(dns::Error::Bogus) && mx.dnssec != dns::Dnssec::Secure {
+        a = resolver
+            .addresses_despite_bogus(&host.exchange, false)
+            .await;
+    }
+    let a = a.map_err(|e| format!("{}: {e}", host.exchange))?;
     a.records
         .first()
         .copied()

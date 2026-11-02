@@ -333,6 +333,15 @@ grouped by development phase (see the roadmap in [README.md](README.md)).
   §5.3).
 
 #### Fixed
+- **Mail to Gmail could not be delivered.** hickory-resolver 0.26.3 marks
+  names under some unsigned delegations as DNSSEC "Bogus", including
+  `l.google.com`, where Gmail's MX hosts live, so no Gmail MX had a usable
+  address. Found by testing against real DNS. Idly now uses such
+  addresses as unsigned, but only when the domain's MX records are
+  themselves not DNSSEC-signed. Anyone able to forge those addresses could
+  already forge the unsigned MX records, and DANE never applies there
+  (Gmail is still protected by its MTA-STS policy). Signed MX records,
+  domains without MX, and TLSA lookups still treat Bogus as fatal.
 - **`idly serve` could not start with the default listen addresses on
   Linux.** `[::]:25` also claimed IPv4 port 25, so binding it after
   `0.0.0.0:25` failed with "address in use". IPv6 listeners are now

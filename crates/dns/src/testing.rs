@@ -19,6 +19,8 @@ struct Entry {
     fail: Option<Error>,
     /// Every lookup of this name never answers (an attacker's slow DNS).
     hang: bool,
+    /// A/AAAA lookups say Bogus, but `addresses_despite_bogus` answers.
+    bogus_addresses: bool,
 }
 
 /// A static zone. Lookups of unknown names give NXDOMAIN; a known name
@@ -90,6 +92,14 @@ impl StaticResolver {
         self
     }
 
+    /// Make `name`'s A/AAAA records fail DNSSEC validation (Bogus), as the
+    /// real resolver does for some unsigned delegations;
+    /// `addresses_despite_bogus` still returns them, as Insecure.
+    pub fn with_bogus_addresses(mut self, name: &str) -> Self {
+        self.entry(name).bogus_addresses = true;
+        self
+    }
+
     /// Make every lookup of `name` hang forever; callers must time out.
     pub fn with_hang(mut self, name: &str) -> Self {
         self.entry(name).hang = true;
@@ -137,15 +147,45 @@ fn ptr_key(ip: IpAddr) -> String {
     format!("ptr:{ip}")
 }
 
+impl StaticResolver {
+    fn bogus(&self, name: &str) -> bool {
+        self.entries
+            .get(&normalize_name(name))
+            .is_some_and(|e| e.bogus_addresses)
+    }
+}
+
 impl Resolver for StaticResolver {
     async fn mx(&self, name: &str) -> Result<Answer<Mx>, Error> {
         self.lookup("MX", name, |e| &e.mx).await
     }
     async fn a(&self, name: &str) -> Result<Answer<IpAddr>, Error> {
-        self.lookup("A", name, |e| &e.a).await
+        let answer = self.lookup("A", name, |e| &e.a).await;
+        if self.bogus(name) {
+            Err(Error::Bogus)
+        } else {
+            answer
+        }
     }
     async fn aaaa(&self, name: &str) -> Result<Answer<IpAddr>, Error> {
-        self.lookup("AAAA", name, |e| &e.aaaa).await
+        let answer = self.lookup("AAAA", name, |e| &e.aaaa).await;
+        if self.bogus(name) {
+            Err(Error::Bogus)
+        } else {
+            answer
+        }
+    }
+    async fn addresses_despite_bogus(&self, name: &str, v6: bool) -> Result<Answer<IpAddr>, Error> {
+        let rtype = if v6 { "AAAA!" } else { "A!" };
+        let answer = if v6 {
+            self.lookup(rtype, name, |e| &e.aaaa).await
+        } else {
+            self.lookup(rtype, name, |e| &e.a).await
+        };
+        answer.map(|a| Answer {
+            records: a.records,
+            dnssec: Dnssec::Insecure,
+        })
     }
     async fn txt(&self, name: &str) -> Result<Answer<Vec<u8>>, Error> {
         self.lookup("TXT", name, |e| &e.txt).await

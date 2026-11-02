@@ -118,6 +118,14 @@ Principle: **lenient on harmless syntax, strict on framing.**
 - DKIM: a signature with `l=` that covers only part of the body is
   reported as `policy`, never `pass` (RFC 6376 §8.2: content can be
   appended).
+- DNSSEC "Bogus" for MX hosts (maintainer decision, 2026-11-02):
+  hickory-resolver 0.26.3 wrongly calls some unsigned delegations Bogus,
+  e.g. `l.google.com`, where Gmail's MX hosts live. Only for the hosts of
+  an explicit MX RRset that is itself not DNSSEC-secure, `route` uses
+  their addresses as insecure (`Resolver::addresses_despite_bogus`).
+  Secure MX RRsets, implicit MX, TLSA and every other lookup stay strict.
+  Remove this when hickory fixes it (live test
+  `live_gmail_mx_hosts_despite_hickory_bogus` tracks it).
 - Queue durability: spool file (fsync, rename, fsync dir) BEFORE the
   database commit, and 250 only after both. Recovery deletes spool files
   without a row (never acknowledged) and fails rows without a spool file.
